@@ -1,0 +1,199 @@
+<!-- Home Page -->
+<!-- Created: 7/30/2025 -->
+<!DOCTYPE html>
+
+<html>
+    <head>
+        <title>Home Web Page</title>
+        <link rel="stylesheet" href="../static/style.css">
+        <!-- Plotly scripts -->
+        <script src='https://cdn.plot.ly/plotly-3.0.1.min.js'></script>
+        <script src='https://cdnjs.cloudflare.com/ajax/libs/d3/3.5.17/d3.min.js'></script>
+        <!-- Add Icons -->
+        <script src="https://kit.fontawesome.com/a848d7736f.js" crossorigin="anonymous"></script>
+    </head>
+
+    <body>
+        <!-- Grid Layout Divs -->
+        <div class="container">
+            <div class="nav_bar">
+                <div>
+                    <ul>
+                        <li><a class="active" href="/"><i class="fa-regular fa-house fa-xl"></i> Home</a></li>
+                        <li><a href="/telemetry"><i class="fa-regular fa-folder-open fa-xl"></i> Trips</a></li>
+                        <li><a href="/about"><i class="fa-regular fa-user fa-xl"></i> About</a></li>
+                        <li><a href="https://github.com/sweepy8/AEGIS" target="_blank"><i class="fa-regular fa-file-code fa-xl"></i> Github</a></li>
+                    </ul>
+                </div>
+                <div style="position: absolute;bottom: 20px;left: 20%">
+                    <a href="https://www.csun.edu/engineering-computer-science/electrical-computer-engineering" target="_blank">
+                        <img src="../static/images/CSUN_logo.png" alt="AEGIS" style="width: 75%;">
+                    </a>
+                </div>
+            </div>
+            <div class="home_page">
+                <div class="logo"></div>
+                <div class="timeline">
+                    <div class="container_timeline left">
+                        <div class="content">
+                            <h2>August 2025</h2>
+                            <p>
+                                AEGIS
+                            </p>
+                        </div>
+                    </div>
+                    <div class="container_timeline right">
+                        <div class="content">
+                            <h2>July 2025</h2>
+                            <p>
+                                Room to grow!
+                            </p>
+                            <p>
+                                Prototyping and adding revisions to electrical components became difficult as a team so a new microcontoller board was designed with all our teams
+                                needs in mind, along with room to grow. But first we had to make a schematic diagram with all necessary pins and their respective nets.
+                            </p>
+                            <img src="../static/images/Schematic_DiagramV1_July.png" alt="Schematic Diagram" style="width:100%;">
+                            <p>
+                                Once the first version of the schematic diagram was completed, the microcontroller board was put into construction.
+                            </p>
+                            <img src="../static/images/Prototype_Motherboard_July.png" alt="Microntroller Board" style="width:100%;">
+                        </div>
+                    </div>
+                    <div class="container_timeline left">
+                        <div class="content">
+                            <h2>July 2025</h2>
+                            <p>
+                                Data!
+                            </p>
+                            <p>
+                                Still working on the software and controls of the rover, along with revising electrical components, we realized there is a missed opportunity to 
+                                aggregate the telemetry data from the rover into a single location that is easy to use. Giving way to the website. Starting with structure and function then adding style.
+                            </p>
+                            <img src="../static/images/Website_Redesign_July.png" alt="Website Construction" style="width:100%;">
+                        </div>
+                    </div>
+                    <div class="container_timeline right">
+                        <div class="content">
+                            <h2>June 2025</h2>
+                            <p>
+                                Accessories!
+                            </p>
+                            <p>
+                                Along with a new plywood frame, we started to 3D print modules that will attach to the chassis of the rover.
+                                One such design is the LiDAR pillar and mount. The stepper motor is concealed inside the pilar where the top part rotates along with the LiDAR.
+                                Giving function to the essence of our project.
+                            </p>
+                            <img src="../static/images/LiDAR_MountV1_June.jpg" alt="LiDAR Mount" style="width:100%;">
+                        </div>
+                    </div>
+                    <div class="container_timeline left">
+                        <div class="content">
+                            <h2>May 2025</h2>
+                            <p>
+                                It's Alive!
+                            </p>
+                            <p>
+                                The protoype rover is equipped enough to make its first trip! A massive accomplishment for the team and certainly a moment to enjoy.
+                            </p>
+                            <p>
+                                Maybe a little too excited...
+                            </p>
+                            <video width="100%" height="100%" id="test_drive" autoplay muted loop>
+                                <source src="../static/images/Test_Drive_May.mp4" type="video/mp4">
+                            </video>
+                        </div>
+                    </div>
+                    <div class="container_timeline right">
+                        <div class="content">
+                            <h2>April 2025</h2>
+                            <p>
+                                We're Engineers!
+                            </p>
+                            <p>
+                                Quickly realizing our breadboards are limiting our ability we moved to a more robust platform, perf boards and pcbs (no breadboards were harmed in this process...).
+                            </p>
+                            <p>
+                                Previous designs for the stepper motor driver, the DC motor driver, current meter and more are redesigned on these platforms allowing us more modularity and control.
+                            </p>
+                            <img src="../static/images/Stepper_Motor_Board_Front_April.jpg" alt="Stepper Motor Driver" style="width:100%;">
+                            <img src="../static/images/Motor_Driver_PCB_Ver_2.0_April.png" alt="DC Motor Driver" style="width:100%;">
+                            <img src="../static/images/MultimeterV1_April.png" alt="Current Meter" style="width:100%;">
+                        </div>
+                    </div>
+                    <div class="container_timeline left">
+                        <div class="content">
+                            <h2>March 2025</h2>
+                            <p>
+                                Frankenstein's Monster! Looks pretty good...
+                            </p>
+                            <p>
+                                Our first mechanical prototype that will carry us through mountains of testing is complete.
+                                The design was made from mostly donated parts, cut with a CNC and tapped with a drill press. Rivets everywhere.
+                            </p>
+                            <img src="../static/images/V1BotRockerBogieOutline_March.png" alt="Suspension outline" style="width:100%;">
+                            <p>
+                                Thank you Mark Terryberry for helping bring these designs to life!
+                                Isn't that dinosaur box glorious?
+                            </p>
+                            <img src="../static/images/Rover_Completed_March.jpg" alt="Rover Prototype" style="width:100%;">
+                            <p>
+                                We have also achieved our first LiDAR Scan! Plotted using MATLAB, some with hundreds of thousands of points, some with millions. Still some kinks to work out.
+                            </p>
+                            <img src="../static/images/First_Scan_March.png" alt="Rover Prototype" style="width:100%;">
+                        </div>
+                    </div>
+                    <div class="container_timeline right">
+                        <div class="content">
+                            <h2>February 2025</h2>
+                            <p>
+                                This is when things got exciting. 
+                            </p>
+                            <p>
+                                Parts started to come in from our first purchase order and we could begin our experimental phase.
+                                Starting off with some basic sensors and how they interact with a microcontroller.
+                                The first to be tested were the Ultrasonic Sensors which can read distance to an object based on received trigger signal.
+                            </p>
+                            <img src="../static/images/Ultrasonic_Breadboard_February.jpg" alt="US Sensors" style="width:100%;">
+                            <p>
+                                We also started to learn more about motor drivers and how they are used to control DC motors in various applications. 
+                                Designing our own breadboard version to get a better idea on how to design one moving forward.
+                            </p>
+                            <img src="../static/images/H-Bridge_Frebruary.PNG" alt="US Sensors" style="width:100%">
+                        </div>
+                    </div>
+                    <div class="container_timeline left">
+                        <div class="content">
+                            <h2>January 2025</h2>
+                            <p>
+                                Research, research, and oh yeah, more research!
+                            </p>
+                            <p>
+                                As the Spring semester started, we began to delve into research.
+                                Asking ourselves questions like:
+                                What is the function and goal of our rover?
+                                What materials do we need to build the body?
+                                What size wheels and DC Motors do we get?
+                                How do we control the rover?
+                                How will we power everything?
+                                Questions began to flood the team, and we started to tackle each problem, one by one.
+                            </p>
+                        </div>
+                    </div>
+                    <div class="container_timeline right">
+                        <div class="content">
+                            <h2>December 2024</h2>
+                            <p>
+                                The idea of AEGIS is born.
+                            </p>
+                            <p>
+                                A passion for ingenuity and learning led to the start of the team. In the following weeks project goals and concepts designs were created,
+                                along with a broad sprectrum of learning opportunities for each member.
+                            </p>
+                            <img src="../static/images/Initial_Design_Concept_December.png" alt="Rover Concept" style="width:100%">
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </body>
+</html>

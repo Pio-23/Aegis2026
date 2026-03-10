@@ -1,0 +1,8 @@
+[project]
+name = "aegis"
+version = "0.0.1"
+description = "Software for CSUN ECE Senior Design Project - AEGIS"
+
+[build-system]
+build-backend = "flit_core.buildapi"
+requires = ["flit_core >=3.2,<4"]

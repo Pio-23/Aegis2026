@@ -1,0 +1,278 @@
+/* 
+Telemetry Viewer Data/Visual
+Created: 7/30/2025
+
+--- Color Palette ---
+Primary: Crimson Red #D72638
+Secondary: Sunset Orange #F46036 (hover/highlights)
+Accent 1: Vibrant Yellow #FFD23F
+Accent 2: Electric Teal #28D9C7
+*/
+
+:root {
+  --bg: #1B1B1E;
+  --white: #F5F5F5;
+  --black: rgba(0,0,0,1);
+  --primary: #D72638;
+  --secondary: #F46036;
+  --yellow: #FFD23F;
+  --teal: #28D9C7;
+
+  --radius: 6px;
+  --blur-5: blur(5px);
+  --blur-10: blur(10px);
+  --shadow: 0 4px 4px hsla(0, 0%, 0%, 0.4);
+}
+
+/* Base */
+* { box-sizing: border-box; }
+a { text-decoration: none; }
+.plot_header i { color: white; }
+
+/* Page */
+html, body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  overflow: hidden;
+  background-color: var(--bg);
+}
+
+/* Grid Layout Section */
+.container {
+  display: grid;
+  height: 100%;
+  grid-template-columns: repeat(12, 1fr);
+  grid-template-rows: repeat(12, 1fr);
+  gap: 5px;
+  background: url('../static/images/mars_landscape3.jpeg') center/cover no-repeat;
+}
+
+/* Shared glass/elevation styles (grouped to avoid duplication) */
+.nav_bar,
+.trip {
+  backdrop-filter: var(--blur-10);
+  border-radius: var(--radius);
+  background-color: var(--black);
+}
+.plot_header,
+.plot {
+  backdrop-filter: var(--blur-5);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+}
+
+/* Nav bar */
+.nav_bar { 
+  grid-area: 1 / 1 / 13 / 2;
+  overflow: hidden;
+  position: relative;
+}
+
+/* Home page */
+.home_page { 
+  grid-area: 1 / 2 / 13 / 13; 
+  display: inline;
+  border-radius: var(--radius);
+  backdrop-filter: var(--blur-5);
+  overflow-y: scroll;
+}
+.logo {
+  width: 100%;
+  height: 20%;
+  background: url('../static/images/AEGIS_Transparent.png') center/contain no-repeat;
+}
+
+/* About page */
+.person {
+  border-radius: var(--radius);
+  background-color: rgba(255, 255, 255, 0.636);
+  color: hsla(354, 70%, 50%, 0.6);
+  text-align:center;
+  margin-right: 15px;
+  margin-left: 15px;
+}
+
+#zach     { grid-area: 2 / 3 / 7 / 5; }
+#justin   { grid-area: 2 / 6 / 7 / 8; }
+#johnny   { grid-area: 2 / 9 / 7 / 11; }
+#jonathan { grid-area: 8 / 3 / 12 / 5; }
+#melissa  { grid-area: 8 / 6 / 12 / 8; }
+#celeste  { grid-area: 8 / 9 / 12 / 11; }
+
+/* Telemetry page */
+.trip { 
+  grid-area: 1 / 2 / 2 / 13; 
+  display: flex;
+  align-items: center;
+  overflow: hidden;
+}
+
+.plot_header {
+  display: flex;
+  align-items: center;
+  overflow: hidden;
+  margin: 0;
+  padding: 0;
+  background: linear-gradient(
+    90deg, hsla(354, 70%, 50%, 0.6), hsla(356, 73%, 58%, 0.8)
+  );
+}
+#plot1_header { grid-area: 2 / 2 / 3 / 8; }
+#plot2_header { grid-area: 2 / 8 / 3 / 13; }
+#plot3_header { grid-area: 8 / 2 / 9 / 13; }
+
+.plot {
+  position: relative;
+}
+#plot1 { grid-area: 3 / 2 / 8 / 8; }
+#plot2 { grid-area: 3 / 8 / 8 / 13; } 
+#plot3 { grid-area: 9 / 2 / 13 / 13; }
+
+.fullscreen_div {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%; 
+  z-index: 9999;
+}
+
+/* Navigation Bar Vertical */
+.nav_bar ul {
+  list-style: none;
+  margin: 0 0 0 7.5%;
+  padding: 0;
+}
+.nav_bar li a {
+  display: block;
+  width: 90%;
+  margin: 30px 0 0;
+  padding: 0;
+  color: var(--white);
+  text-decoration: none;
+}
+.nav_bar li a:hover:not(.active) { color: var(--secondary); }
+.nav_bar .active { color: var(--primary); }
+
+/* Select Tag Styles */
+#trip_select option[value="default"],
+#plot1_type option[value="default"],
+#plot2_type option[value="default"],
+#plot3_type option[value="default"] {
+  display: none;
+}
+
+.selector {
+  appearance: none;
+  background: linear-gradient(90deg, #D72638, #E2454F);
+  color: var(--white);
+  font-size: 14px;
+  font-weight: bold;
+  padding: 6px 10px;
+  border: none;
+  border-radius: 8px;
+  height: 32px;
+  min-width: 100px;
+  box-shadow: 2px 2px 4px hsla(354, 70%, 50%, 0.5);
+}
+.selector option { background: var(--primary); }
+.selector:hover { background: var(--secondary); }
+.selector:focus { outline: 2px solid var(--yellow); outline-offset: 2px; }
+
+/* Plot header spacing */
+.plot_header div { margin-left: 20px; }
+
+/* Plot fullscreen button */
+.plot button {
+  position: absolute;
+  left: 0;
+  top: 0;
+  padding: 0;
+  background: transparent;
+  border: none;
+}
+.plot button:hover { color: var(--teal); } /* icon inverted in JS*/
+
+/* Timeline */
+.timeline {
+  position: relative;
+  max-width: 100%;
+  margin: 0 auto;
+}
+.timeline::after {
+  content: '';
+  position: absolute;
+  width: 6px;
+  background: white;
+  top: 0;
+  bottom: 0;
+  left: 50%;
+  margin-left: -3px;
+}
+.container_timeline {
+  position: relative;
+  width: 50%;
+  padding: 10px 40px;
+  background: inherit;
+}
+.container_timeline::after {
+  content: '';
+  position: absolute;
+  width: 25px;
+  height: 25px;
+  right: -17px;
+  background: white;
+  border: 4px solid var(--primary);
+  top: 15px;
+  border-radius: 50%;
+  z-index: 1;
+}
+.left { left: 0; }
+.right { left: 50%; }
+
+.left::before,
+.right::before {
+  content: " ";
+  position: absolute;
+  top: 22px;
+  height: 0;
+  width: 0;
+  z-index: 1;
+  border: medium solid white;
+}
+.left::before {
+  right: 30px;
+  border-width: 10px 0 10px 10px;
+  border-color: transparent transparent transparent white;
+}
+.right::before {
+  left: 30px;
+  border-width: 10px 10px 10px 0;
+  border-color: transparent white transparent transparent;
+}
+.right::after { left: -16px; }
+
+.content {
+  position: relative;
+  padding: 20px 30px;
+  background: white;
+  border-radius: var(--radius);
+}
+
+/* Responsive timeline */
+@media screen and (max-width: 600px) {
+  .timeline::after { left: 31px; }
+  .container_timeline {
+    width: 100%;
+    padding-left: 70px;
+    padding-right: 25px;
+  }
+  .container_timeline::before {
+    left: 60px;
+    border: medium solid white;
+    border-width: 10px 10px 10px 0;
+    border-color: transparent white transparent transparent;
+  }
+  .left::after, .right::after { left: 15px; }
+  .right { left: 0; }
+}

@@ -1,0 +1,110 @@
+<!-- Telemetry Viewer Data/Visual -->
+<!-- Created: 7/30/2025 -->
+<!DOCTYPE html>
+
+<html>
+
+    <head>
+        <title>Trip Viewer Web Page</title>
+        <link rel="stylesheet" href="../static/style.css">
+        <!-- Plotly scripts -->
+        <script src='https://cdn.plot.ly/plotly-3.0.1.min.js'></script>
+        <script src='https://cdnjs.cloudflare.com/ajax/libs/d3/3.5.17/d3.min.js'></script>
+        <!-- Add Icons -->
+        <script src="https://kit.fontawesome.com/a848d7736f.js" crossorigin="anonymous"></script>
+    </head>
+
+    <body>
+        
+        <!-- Grid Layout Divs -->
+        <div class="container">
+            <div class="nav_bar">
+                <div>
+                    <ul>
+                        <li><a href="/"><i class="fa-regular fa-house fa-xl"></i> Home</a></li>
+                        <li><a class="active" href="/telemetry"><i class="fa-regular fa-folder-open fa-xl"></i> Trips</a></li>
+                        <li><a href="/about"><i class="fa-regular fa-user fa-xl"></i> About</a></li>
+                        <li><a href="https://github.com/sweepy8/AEGIS" target="_blank"><i class="fa-regular fa-file-code fa-xl"></i> Github</a></li>
+                    </ul>
+                </div>
+                <div style="position: absolute;bottom: 20px;left: 20%">
+                    <a href="https://www.csun.edu/engineering-computer-science/electrical-computer-engineering" target="_blank">
+                        <img src="../static/images/CSUN_logo.png" alt="AEGIS" style="width: 75%;">
+                    </a>
+                </div>
+            </div>
+            <div class="trip">
+                <div style="margin-left: 20px">
+                    <select class="selector" id="trip_select">
+                        <option value="default">Choose a Trip</option>
+                    </select>
+                </div>
+                <div style="height:100%; margin-left: 25%">
+                    <img src="../static/images/AEGIS_Logo.png" alt="AEGIS" style="height: 100%;">
+                </div>
+                <div style="margin-left: 30%;">
+                    <h3><i>Dare Mighty Things</i></h3>
+                </div>
+            </div>
+            <div class="plot_header" id="plot1_header">
+                <div>
+                    <h2><i>Plot 1</i></h2>
+                </div>
+                <div>
+                    <select class="selector" id="plot1_type">
+                        <option value="default">Choose Data Type</option>
+                        <option>Video</option>
+                        <option>LiDAR</option>
+                        <option>Graph</option>
+                    </select>
+                </div>
+                <div>
+                    <select class="selector" id="plot1_data">
+                    </select>
+                </div>
+            </div>
+            <div class="plot" id="plot1">
+            </div>
+            <div class="plot_header" id="plot2_header">
+                <div>
+                    <h2><i>Plot 2</i></h2>
+                </div>
+                <div>
+                    <select class="selector" id="plot2_type">
+                        <option value="default">Choose Data Type</option>
+                        <option>Video</option>
+                        <option>LiDAR</option>
+                        <option>Graph</option>
+                    </select>
+                </div>
+                <div>
+                    <select class="selector" id="plot2_data">
+                    </select>
+                </div>
+            </div>
+            <div class="plot" id="plot2">
+            </div>
+            <div class="plot_header" id="plot3_header">
+                <div>
+                    <h2><i>Plot 3</i></h2>
+                </div>
+                <div>
+                    <select class="selector" id="plot3_type">
+                        <option value="default">Choose Data Type</option>
+                        <option>Video</option>
+                        <option>LiDAR</option>
+                        <option>Graph</option>
+                    </select>
+                </div>
+                <div>
+                    <select class="selector" id="plot3_data">
+                    </select>
+                </div>
+            </div>
+            <div class="plot" id="plot3">
+            </div>
+        </div>
+        
+        <script src="{{ url_for('static', filename='../static/js/dynamic.js') }}"></script>
+    </body>
+</html>

@@ -1,0 +1,22 @@
+# Ignore virtual environment files
+/venv/
+
+# Ignore large-file data
+/data/
+/stream/static/trips/*
+
+# Exempt (include) specific trips to be pushed to the remote
+!/stream/static/trips/20250830_111602/
+
+# Ignore drafting document
+planning.txt
+
+# Ignore .vscode folder (used for config JSONs)
+/.vscode/
+
+# Ignore VSCodeCounter if it is installed
+/.VSCodeCounter/
+
+# Ignore Python cache
+__pycache__/
+*.pyc
