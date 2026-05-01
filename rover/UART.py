@@ -501,19 +501,41 @@ def give_controls_to_autopilot(serial_conn : Serial, trip_json : str, dump_folde
     print("[INI] UART.py: LLM Autopilot Enabled.")
     from rover.autopilot import Autopilot
     spartan = Autopilot()
+
+    MIN_BATTERY_VOLTAGE = 15.0 #lowest battery that it will take to run the movement
+    MIN_BATTERY_PERCENT = 30
+
+
     while tripping:
         telemetry = file_utils.get_latest_telemetry(
             filepath=dump_folder,
             filename=trip_json
         )
         if telemetry is not None:
+            print("[DEBUG] Raw battery telemetry:", telemetry["ugv"]["battery"])
             actions = spartan.decide_actions(telemetry)
             for action in actions:
                 if spartan.validate_action(action):
                     if action.function.name == "move_rover": # type: ignore
                         args = json.loads(action.function.arguments or "{}")  # type: ignore
-                        speed = args.get("speed", 0.0)
+                        speed = args.get("spd", args.get("speed", 0.0))
                         op = args.get("op", "")
+
+                        try: 
+                            battery_voltage = telemetry["ugv"]["battery"]["voltage_v"]["batt_v"]
+                            battery_percent = telemetry["ugv"]["battery"]["capacity_pct"]["batt_pct"]
+                        except (KeyError, TypeError):
+                            print("[SAFE] Battery telemetry missing. Blocking movement.")
+                            continue
+
+                        if battery_voltage < MIN_BATTERY_VOLTAGE:
+                            print(f"[SAFE] Battery voltage too low ({battery_voltage} V). Blocking movement.")
+                            continue
+
+                        if battery_percent < MIN_BATTERY_PERCENT:
+                            print(f"[SAFE] Battery percent too low ({battery_percent}%). Blocking movement.")
+                            continue
+
                         if op == "MOVE":
                             serial_conn.write(
                                 generate_command(

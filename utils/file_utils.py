@@ -179,9 +179,15 @@ def get_latest_telemetry(filepath: str, filename: str) -> dict:
 
     with FileLock(f"{filename}.lock"):
         with open(filename, 'r') as f:
-            telemetry_data = json.load(f)
+            try:
+              telemetry_data = json.load(f)
+            except json.JSONDecodeError:
+              #File is being written to right now 
+              return None
+
             if len(telemetry_data["telemetry"]) == 0:
-                raise ValueError("[ERR] file_utils.py: No telemetry data found in JSON!")
+                return None #safer than crashing
+              
             latest_telemetry = telemetry_data["telemetry"][-1]
 
     return latest_telemetry

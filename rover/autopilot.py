@@ -3,37 +3,45 @@
 # AEGIS Senior Design, Created 10/22/2025
 
 import os
+import openai
+
 import json
 import time
-from typing import Optional
 
-from google import genai
-from google.genai import types
+from lidar import scan
 
-# your lidar module (you already had this)
-from lidar import scan as lidar_scan
 
 class Autopilot:
 
     system_context = """
-        You are controlling a rover. Follow these rules:
-        - Always prioritize safety of the motors and sensors.
-        - Decisions must be based on incoming telemetry.
-        - Telemetry is provided as an array with the following mapping:
-            [uptime, remaining storage in GB, scan resolution, camera connected, 
-            camera recording, 
-            front left mot. amps, mid left mot. amps, rear left mot. amps, 
-            front right mot. amps, mid right mot. amps, rear right mot. amps, 
-            front left ultrasonic dist (cm), front center US. dist, front right US. 
-            dist, lidar US. dist, rear US. dist, IMU yaw (deg)]
-        - Respond only using tools. If unsafe or unclear, call `no_op` with a safe 
-        fallback and a short reason.
-        - Rings per scan is inversely proportional to angular resolution. Better resolution
-        occurs with higher ring scans. Use only multiples of 200 rings when configuring
-        rings per scan.
-        - Target 400 ring scans unless you believe a higher resolution scan is warranted
-        and take a scan once for every 5 times you move. Ring count will latch.
-        """
+    You are controlling a rover. Follow these rules:
+     - Always prioritize safety of the motors and sensors.
+     - Decisions must be based only on the incoming telemetry JSON.
+     - Telemetry is a nested JSON object with these sections:
+      - rpi
+      - arduino
+      - lidar
+      - camera
+      - motors
+     - ultrasonics
+      - imu
+      - ugv
+    - Battery information is located at:
+         telemetry["ugv"]["battery"]["capacity_pct"]["batt_pct"]
+         telemetry["ugv"]["battery"]["voltage_v"]["batt_v"]
+         telemetry["ugv"]["battery"]["current_a"]["batt_a"]
+    - Motor information is under:
+         telemetry["motors"]["front_left"], ["mid_left"], ["rear_left"],
+        ["front_right"], ["mid_right"], ["rear_right"]
+    - Ultrasonic information is under:
+         telemetry["ultrasonics"]["lidar_cm"], ["left_cm"], ["center_cm"],
+         ["right_cm"], ["rear_cm"]
+    - IMU information is under telemetry["imu"].
+    - Respond only using tools.
+    - If unsafe or unclear, call `no_op` with a short reason.
+    - Use scan_environment only when additional environmental sensing is needed.
+    """
+    context_msg: dict[str, str] = {"role": "system", "content": system_context}
 
     # Define available tools for the rover autopilot
     aegis_tools = [
@@ -45,7 +53,8 @@ class Autopilot:
                     "Captures a high-res LiDAR scan of the rover's surroundings."
                     "Use this to gather detailed environmental data whenever"
                     "telemetry suggests anything worth scanning, or if it has been"
-                    "a while since the last scan."
+                    "a while since the last scan. Make sure to make it as cheap as possible"
+                    "by making the scan only 200 rings"
                 ),
                 "parameters": {
                     "type": "object",
@@ -101,170 +110,71 @@ class Autopilot:
                     "Signal that no safe/clear action can be taken now."
                 ),
                 "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "reason": {"type":"string", "description":"Why action is deferred."},
-                        "confidence": {
-                            "type":"number", "minimum":0, "maximum":1,
-                            "description":"Model confidence that doing nothing is correct."
-                        },
-                        "needs": {
-                            "type":"array",
-                            "items":{"type":"string"},
-                            "description":"Specific data/information needed to proceed."
-                        }
+                "type": "object",
+                "properties": {
+                    "reason": {"type":"string", "description":"Why action is deferred."},
+                    "confidence": {
+                    "type":"number", "minimum":0, "maximum":1,
+                    "description":"Model confidence that doing nothing is correct."
                     },
-                    "required": ["reason"]
+                    "needs": {
+                    "type":"array",
+                    "items":{"type":"string"},
+                    "description":"Specific data/information needed to proceed."
+                    }
+                },
+                "required": ["reason"]
                 }
             }
         }
     ]
 
     def __init__(self) -> None:
-        self.memory_depth = 21  # Number of past interactions to remember
 
-        # Keep system_context string as-is (used as system_instruction below)
-        self.model_name = "models/gemini-2.0-flash"  # or whichever model you prefer
+        self.memory_depth = 21  # Number of past interactions to remember
+        self.memory = [self.context_msg]
+        self.model_name = "gpt-5-nano"  # LLM model to use
 
         # Connect API account to client
-        self.client = genai.Client(
-        api_key=os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+        self.client = openai.OpenAI(
+        api_key=os.getenv("OPENAI_API_KEY")
         )
 
-        # setup tools for gemini (convert aegis_tools if necessary)
-        self.tools = []
-        if hasattr(self, "aegis_tools") and isinstance(self.aegis_tools, list):
-            for tool in self.aegis_tools:
-                # handle both shapes: either the tool is already a FunctionDeclaration/SDK object
-                if isinstance(tool, types.FunctionDeclaration):
-                    self.tools.append(tool)
-                    continue
-
-                # If your tool was a dict like {"type":"function","function":{...}}, dig in:
-                func = tool.get("function") if isinstance(tool, dict) else None
-                if func and isinstance(func, dict):
-                    name = func.get("name")
-                    desc = func.get("description", "")
-                    params = func.get("parameters", {"type":"object","properties":{}, "required":[]})
-                    # Create an SDK FunctionDeclaration
-                    fd = types.FunctionDeclaration(name=name, description=desc, parameters=params)
-                    self.tools.append(fd)
-                else:
-                    # Fallback: if tool looks like a bare function-decl dict with keys name/description/parameters
-                    if isinstance(tool, dict) and "name" in tool:
-                        fd = types.FunctionDeclaration(
-                            name=tool.get("name"),
-                            description=tool.get("description", ""),
-                            parameters=tool.get("parameters", {"type":"object","properties":{}, "required":[]})
-                        )
-                        self.tools.append(fd)
-                    else:
-                        # ignore unknown entries but warn
-                        print(f"[WARN] Skipping invalid tool entry in aegis_tools: {tool}")
-
-        # If conversion left self.tools empty, fallback to a minimal set (optional)
-        if not self.tools:
-            self.tools = [
-                types.FunctionDeclaration(
-                    name="scan_environment",
-                    description="Captures a high-res LiDAR scan.",
-                    parameters={"type":"object","properties":{}, "required":[]}
-                ),
-                types.FunctionDeclaration(
-                    name="move_rover",
-                    description="Issues movement commands to the rover.",
-                    parameters={
-                        "type":"object",
-                        "properties":{
-                            "op":{"type":"string","enum":["TURN","MOVE"]},
-                            "spd":{"type":"number"},
-                            "turn_dir":{"type":"string","enum":["LEFT","RIGHT"]}
-                        },
-                        "required":["op","spd"]
-                    }
-                ),
-                types.FunctionDeclaration(
-                    name="no_op",
-                    description="No safe action available right now.",
-                    parameters={
-                        "type":"object",
-                        "properties":{
-                            "reason":{"type":"string"},
-                            "confidence":{"type":"number","minimum":0,"maximum":1},
-                            "needs":{"type":"array","items":{"type":"string"}}
-                        },
-                        "required":["reason"]
-                    }
-                )
-            ]
-
-        self.model = self.client.models
-
-        self.memory = [
-        types.Content(
-        role="system",
-        parts=[types.Part(text=self.system_context)]
-        )
-        ]
-
-    def decide_actions(self, telemetry: list) -> Optional[list]:
+    def decide_actions(self, telemetry):
         """
         Decide on the next action based on telemetry input.
         Returns a dict with action details.
         """
-        t0 = time.perf_counter()
 
-        telemetry_text = json.dumps(telemetry)
-        user_content = types.Content(role="user", parts=[types.Part(text=f"Telemetry: {telemetry_text}")])
+        start_time = time.perf_counter()
 
-        # Use update_memory (you implement update_memory) to store the typed content
-        self.update_memory({"role": "user", "content": f"Telemetry: {telemetry_text}"})
+        self.update_memory({"role": "user", "content": json.dumps(telemetry)})
 
-        # Use generate_content with the tools; SDK will decide to return function_call parts
-        try:
-            resp = self.client.models.generate_content(
-            model=self.model_name,
-            contents=[user_content],
-            config=types.GenerateContentConfig(
-            tools=self.tools,
-            system_instruction=self.system_context,
-         ),
-)
+        # Prompt the model with tools and telemetry
+        try:    
+            response = self.client.chat.completions.create(
+                model=self.model_name,
+                messages=self.memory,                   # type: ignore
+                tools=Autopilot.aegis_tools,                  # type: ignore
+                tool_choice="auto",         # auto, none, required
+                temperature=1     # Token probability differential (creativity) [0,2]
+        )
         except Exception as e:
-            print(f"[ERROR] model.generate_content failed: {e}")
-            # publish_stop() is expected elsewhere; don't alter behavior
+            print(f"[ERROR] Autopilot.decide_actions: {e}")
             return []
 
-        # response may have function_calls; try to extract them robustly
-        function_calls = []
 
-        # new SDK sometimes exposes .function_calls or .candidates[].content.parts
-        try:
-            # preferred: resp.function_calls (list of FunctionCall objects)
-            fc = getattr(resp, "function_calls", None)
-            if fc:
-                function_calls = fc
-            else:
-                # inspect candidates' content parts for function_call elements
-                candidates = getattr(resp, "candidates", []) or []
-                for cand in candidates:
-                    content = getattr(cand, "content", None)
-                    if content and getattr(content, "parts", None):
-                        for part in content.parts:
-                            if getattr(part, "function_call", None):
-                                function_calls.append(part.function_call)
-        except Exception as e:
-            print(f"[WARN] parsing function calls: {e}")
+        msg = response.choices[0].message
+        print("[DEBUG] Autopilot.decide_action: Received response from LLM.")
+        print(f"[DEBUG] Full response: {response}")
+        self.update_memory({
+            "role": "assistant",
+             "content": msg.content or ""
+             })
 
-        # Print debug text if available
-        try:
-            print("[DEBUG] model text:", resp.text)
-        except Exception:
-            pass
+        print(f"Took {round(time.perf_counter() - start_time, 3)} seconds.")
 
-        elapsed = time.perf_counter() - t0
-        print(f"[INFO] Gemini call took {elapsed:.3f}s, got {len(function_calls)} function call(s).")
-        return function_calls
+        return msg.tool_calls or []
 
     def validate_action(self, toolcall) -> bool:
         """
