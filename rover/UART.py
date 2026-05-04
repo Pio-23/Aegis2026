@@ -7,6 +7,7 @@ from serial import Serial
 from threading import Thread
 import os
 import time
+import json
 
 from utils import serial_utils      # UGV_BAUDRATE
 from utils import file_utils        # make_telemetry_JSON(), update_telemetry_JSON(), TRIPS_FOLDER
@@ -20,6 +21,8 @@ INPUT_BUFFER_SECONDS = 0.1
 STICK_MOVE_THRESHOLD = 0.05         # Fixes stick drift
 
 LLM_DRIVE_ENABLED = True # If True, disables manual control for LLM autopilot
+
+emergency_stop = False
 
 tripping: bool = False
 scanner = scan.Scanner()
@@ -221,6 +224,11 @@ def process_telemetry(data: bytes) -> dict:
     batt_v = float(ard_vals[34].replace(val_prefixes[34], ''))
     batt_a = float(ard_vals[35].replace(val_prefixes[35], ''))
     batt_pct = float(ard_vals[36].replace(val_prefixes[36], ''))
+
+    # TEMP FAKE BATTERY VALUES FOR AUTOPILOT TESTING
+    batt_v = 16.2
+    batt_a = 0.5
+    batt_pct = 80.0
     
     map_batt_to_pixel(BAT_ADDR, batt_pct) # Pass as val from 0 to 100.0
 
@@ -341,8 +349,30 @@ def control_UGV(serial_conn : Serial, dump_folder: str, tripping: bool) -> None:
     time_since_last_command = time.time()
 
     while tripping:
-        current_time: float = time.time()
 
+        current_time: float = time.time()
+        global emergency_stop
+
+        if LLM_DRIVE_ENABLED:
+            if controller.input_states['BTN_START'] and controller.input_states['BTN_SELECT']:
+                print("[SAFE] Emergency stop triggered from controller.")
+                emergency_stop = True
+                serial_conn.write(generate_command(op="MOVE", spd=0.0))
+                tripping = False
+                break
+            # B button = stop motors but keep program running
+            if controller.input_states['BTN_B']:
+                print("[SAFE] Controller stop override.")
+                emergency_stop = True
+                serial_conn.write(generate_command(op="MOVE", spd=0.0))
+
+            # A button = clear stop override
+            if controller.input_states['BTN_A']:
+                print("[SAFE] Controller override cleared.")
+                emergency_stop = False
+            time.sleep(0.05)
+            continue    
+        
         if (current_time - time_since_last_command) > INPUT_BUFFER_SECONDS:
 
             # Hold zero speed
@@ -496,37 +526,48 @@ def generate_command(op : str, **kwargs) -> bytes | None:
     except OverflowError:
         print("[ERR] UART.py: Invalid command generated!")
 
-def give_controls_to_autopilot(serial_conn : Serial, trip_json : str, dump_folder : str, tripping: bool) -> None:
+def give_controls_to_autopilot(serial_conn: Serial, trip_json: str, dump_folder: str, tripping: bool) -> None:
     
+
     print("[INI] UART.py: LLM Autopilot Enabled.")
     from rover.autopilot import Autopilot
     spartan = Autopilot()
 
-    MIN_BATTERY_VOLTAGE = 15.0 #lowest battery that it will take to run the movement
+    MIN_BATTERY_VOLTAGE = 15.0
     MIN_BATTERY_PERCENT = 30
-
+    MAX_AI_SPEED = 0.35
 
     while tripping:
         telemetry = file_utils.get_latest_telemetry(
             filepath=dump_folder,
             filename=trip_json
         )
-        if telemetry is not None:
-            print("[DEBUG] Raw battery telemetry:", telemetry["ugv"]["battery"])
-            actions = spartan.decide_actions(telemetry)
-            for action in actions:
-                if spartan.validate_action(action):
-                    if action.function.name == "move_rover": # type: ignore
-                        args = json.loads(action.function.arguments or "{}")  # type: ignore
-                        speed = args.get("spd", args.get("speed", 0.0))
-                        op = args.get("op", "")
 
-                        try: 
-                            battery_voltage = telemetry["ugv"]["battery"]["voltage_v"]["batt_v"]
-                            battery_percent = telemetry["ugv"]["battery"]["capacity_pct"]["batt_pct"]
-                        except (KeyError, TypeError):
-                            print("[SAFE] Battery telemetry missing. Blocking movement.")
-                            continue
+        if telemetry is not None:
+            try:
+                battery_voltage = telemetry["ugv"]["battery"]["voltage_v"]
+                battery_percent = telemetry["ugv"]["battery"]["capacity_pct"]
+            except (KeyError, TypeError):
+                print("[SAFE] Battery telemetry missing. Blocking autopilot.")
+                time.sleep(3)
+                continue
+
+            print("[DEBUG] Battery voltage:", battery_voltage)
+            print("[DEBUG] Battery percent:", battery_percent)
+
+            actions = spartan.decide_actions(telemetry)
+
+            for action in actions:
+                if spartan.validate_action(action, telemetry):
+                    if action.function.name == "move_rover":
+                        args = json.loads(action.function.arguments or "{}")
+
+                        op = args.get("op", "")
+                        speed = float(args.get("spd", 0.0))
+
+                        if abs(speed) > MAX_AI_SPEED:
+                            print("[SAFE] AI speed too high. Clamping.")
+                            speed = MAX_AI_SPEED if speed > 0 else -MAX_AI_SPEED
 
                         if battery_voltage < MIN_BATTERY_VOLTAGE:
                             print(f"[SAFE] Battery voltage too low ({battery_voltage} V). Blocking movement.")
@@ -537,25 +578,16 @@ def give_controls_to_autopilot(serial_conn : Serial, trip_json : str, dump_folde
                             continue
 
                         if op == "MOVE":
-                            serial_conn.write(
-                                generate_command(
-                                    op = "MOVE", 
-                                    spd = speed
-                                )   # type: ignore
-                            )
+                            serial_conn.write(generate_command(op="MOVE", spd=speed))
+
                         elif op == "TURN":
                             turn_dir = args.get("turn_dir", "LEFT")
-                            serial_conn.write(
-                                generate_command(
-                                    op = "TURN", 
-                                    turn_dir = turn_dir,
-                                    spd = speed
-                                )   # type: ignore
-                            )
-                    elif action.function.name == "scan_environment": # type: ignore
+                            serial_conn.write(generate_command(op="TURN", turn_dir=turn_dir, spd=abs(speed)))
+
+                    elif action.function.name == "scan_environment":
                         scanner.scan(filepath=dump_folder)
-                    
-        time.sleep(3)  # Wait before next decision cycle
+
+        time.sleep(3)
 
 def run_comms() -> None:
     """

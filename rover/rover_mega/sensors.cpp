@@ -271,6 +271,18 @@ void sensors_batt_tick(uint32_t /*now_us*/)
   batt_a_sum += batt_a_last;
   batt_pct_sum += batt_pct_last;
   batt_count++;
+  
+  Serial.print("[BATT DEBUG] raw=");
+  Serial.print(analogRead(volt_batt));
+
+  Serial.print(" | batt_v=");
+  Serial.print(batt_v_last);
+
+  Serial.print(" | batt_a=");
+  Serial.print(batt_a_last);
+
+  Serial.print(" | batt_pct=");
+  Serial.println(batt_pct_last);
 }
 
 

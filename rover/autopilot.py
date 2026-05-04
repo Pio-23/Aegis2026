@@ -27,9 +27,9 @@ class Autopilot:
       - imu
       - ugv
     - Battery information is located at:
-         telemetry["ugv"]["battery"]["capacity_pct"]["batt_pct"]
-         telemetry["ugv"]["battery"]["voltage_v"]["batt_v"]
-         telemetry["ugv"]["battery"]["current_a"]["batt_a"]
+         telemetry["ugv"]["battery"]["capacity_pct"]
+         telemetry["ugv"]["battery"]["voltage_v"]
+         telemetry["ugv"]["battery"]["current_a"]
     - Motor information is under:
          telemetry["motors"]["front_left"], ["mid_left"], ["rear_left"],
         ["front_right"], ["mid_right"], ["rear_right"]
@@ -40,6 +40,8 @@ class Autopilot:
     - Respond only using tools.
     - If unsafe or unclear, call `no_op` with a short reason.
     - Use scan_environment only when additional environmental sensing is needed.
+    - TEST MODE: If battery voltage is above 15.0V and battery percent is above 30%, command a small TURN RIGHT with spd=0.15.
+    - In TEST MODE, do not call scan_environment first.
     """
     context_msg: dict[str, str] = {"role": "system", "content": system_context}
 
@@ -83,13 +85,15 @@ class Autopilot:
                             )
                         },
                         "spd": {
-                            "type": "number",
-                            "description": (
-                                "Speed factor in range [-1, 1]."
-                                "Required for MOVE and TURN."
-                                "Positive only for TURN."
-                            )
-                        },
+                             "type": "number",
+                              "minimum": -1,
+                              "maximum": 1,
+                               "description": (
+                                    "Speed factor in range [-1, 1]. "
+                                    "Required for MOVE and TURN. "
+                                    "Positive only for TURN."
+                                 )
+},
                         "turn_dir": {
                             "type": "string",
                             "enum": ["LEFT", "RIGHT"],
@@ -156,8 +160,11 @@ class Autopilot:
                 model=self.model_name,
                 messages=self.memory,                   # type: ignore
                 tools=Autopilot.aegis_tools,                  # type: ignore
-                tool_choice="auto",         # auto, none, required
-                temperature=1     # Token probability differential (creativity) [0,2]
+                tool_choice={
+                    "type": "function",
+                 "function": {"name": "move_rover"}
+                 },
+                temperature=1   # Token probability differential (creativity) [0,2]
         )
         except Exception as e:
             print(f"[ERROR] Autopilot.decide_actions: {e}")
@@ -176,30 +183,75 @@ class Autopilot:
 
         return msg.tool_calls or []
 
-    def validate_action(self, toolcall) -> bool:
+    def validate_action(self, toolcall, telemetry=None) -> bool:
         """
         Validate the proposed action for safety and feasibility.
         Returns True if valid, False otherwise.
         """
 
-        status = True
+        
         name = toolcall.function.name                           # type: ignore
         args = json.loads(toolcall.function.arguments or "{}")  # type: ignore
-        match name:
-            case "scan_environment":
-                print("Calling scan_environment().")
+        
+        if name =="no_op":
+            print(f"calling no_op with args {args}.")
+            return  False
+        
+        if name =="scan_enviroment":
+            print("Calling scan_enviroments().")
+            return True
+        
+        if name != "move_rover":
+            print(f"[SAFE] Unknown tool call: {name}")
+            return False
+        
+        print(f"Calling move_rover with args {args}.")
 
-            case "move_rover":
-                print(f"Calling move_rover with args {args}.")
+        op = args.get("op")
+        spd = args.get("spd")
+        turn_dir = args.get("turn_dir")
 
-            case "no_op":
-                print(f"Calling no_op with args {args}.")
-                status = False  # No-op is not an action
+        if op not in {"MOVE", "TURN"}:
+            print("[SAFE] Invalid op.")
+            return false
 
-            case _: # Default
-                print(f"Called {name} with args {args}.")
+        if not isinstance(spd, (int, float)):
+            print("[SAFE] Invalid op.")
+            return false
+        
+        if spd <-1 or spd >1:
+            print("[SAFE] Speed outside [-1,1]")
+            return False
+        
+        if abs(spd) > 0.25:
+            print("[SAFE] Speed too high for test.")
+            return False
 
-        return status
+        if op == "TURN":
+            if turn_dir not in ["LEFT", "RIGHT"]:
+             print("[SAFE] TURN missing valid turn_dir.")
+             return False
+            if spd <= 0:
+             print("[SAFE] TURN speed must be positive.")
+             return False
+            
+        if op == "MOVE":
+        # Optional: block forward movement if front obstacle is close
+            if telemetry is not None and spd > 0:
+              us = telemetry.get("ultrasonics", {})
+              front_vals = [
+                  us.get("left_cm"),
+                   us.get("center_cm"),
+                   us.get("right_cm"),
+                   us.get("lidar_cm")
+                ]
+            valid_front = [x for x in front_vals if isinstance(x, (int, float))]
+
+            if valid_front and min(valid_front) < 35:
+                print("[SAFE] Obstacle too close. Blocking forward MOVE.")
+                return False
+
+        return True
 
     def update_memory(self, msg : dict) -> None:
         """
