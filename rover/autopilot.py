@@ -2,7 +2,12 @@
 
 # AEGIS Senior Design, Created 10/22/2025
 
+from email.mime import message
+from fileinput import filename
 import os
+from urllib import response
+
+from matplotlib import lines
 import openai
 
 import json
@@ -14,34 +19,22 @@ from lidar import scan
 class Autopilot:
 
     system_context = """
-    You are controlling a rover. Follow these rules:
-     - Always prioritize safety of the motors and sensors.
-     - Decisions must be based only on the incoming telemetry JSON.
-     - Telemetry is a nested JSON object with these sections:
-      - rpi
-      - arduino
-      - lidar
-      - camera
-      - motors
-     - ultrasonics
-      - imu
-      - ugv
-    - Battery information is located at:
-         telemetry["ugv"]["battery"]["capacity_pct"]
-         telemetry["ugv"]["battery"]["voltage_v"]
-         telemetry["ugv"]["battery"]["current_a"]
-    - Motor information is under:
-         telemetry["motors"]["front_left"], ["mid_left"], ["rear_left"],
-        ["front_right"], ["mid_right"], ["rear_right"]
-    - Ultrasonic information is under:
-         telemetry["ultrasonics"]["lidar_cm"], ["left_cm"], ["center_cm"],
-         ["right_cm"], ["rear_cm"]
-    - IMU information is under telemetry["imu"].
-    - Respond only using tools.
-    - If unsafe or unclear, call `no_op` with a short reason.
-    - Use scan_environment only when additional environmental sensing is needed.
-    - TEST MODE: If battery voltage is above 15.0V and battery percent is above 30%, command a small TURN RIGHT with spd=0.15.
-    - In TEST MODE, do not call scan_environment first.
+    You are controlling a rover.
+
+    At startup, perform a LiDAR scan.
+
+    When a LiDAR scan summary is returned, describe the environment by direction:
+    front, front-left, left, back-left, back, back-right, right, and front-right.
+
+    Clearly explain:
+    - which direction has the closest obstacle
+    - which directions are blocked
+    - which directions are clear
+    - which direction looks safest
+    - whether the rover should stay still or move
+
+    Do not assume a direction is clear unless the scan summary says it is clear.
+    If you are unsure about the environment or what to do, ask for another LiDAR scan.
     """
     context_msg: dict[str, str] = {"role": "system", "content": system_context}
 
@@ -144,44 +137,190 @@ class Autopilot:
         api_key=os.getenv("OPENAI_API_KEY")
         )
 
-    def decide_actions(self, telemetry):
+    def decide_actions(self, telemetry, scanner, dump_folder):
         """
-        Decide on the next action based on telemetry input.
-        Returns a dict with action details.
+        Ask GPT what to do.
+        If GPT requests a LiDAR scan, perform the scan,
+        summarize it, send the result back to GPT,
+        then ask GPT again.
         """
 
-        start_time = time.perf_counter()
-
-        self.update_memory({"role": "user", "content": json.dumps(telemetry)})
-
-        # Prompt the model with tools and telemetry
-        try:    
-            response = self.client.chat.completions.create(
-                model=self.model_name,
-                messages=self.memory,                   # type: ignore
-                tools=Autopilot.aegis_tools,                  # type: ignore
-                tool_choice={
-                    "type": "function",
-                 "function": {"name": "move_rover"}
-                 },
-                temperature=1   # Token probability differential (creativity) [0,2]
+        response = self.client.chat.completions.create(
+           model=self.model_name,
+            messages=self.memory,
+            tools=Autopilot.aegis_tools,
+            tool_choice="auto"
         )
-        except Exception as e:
-            print(f"[ERROR] Autopilot.decide_actions: {e}")
+
+        message = response.choices[0].message
+        self.memory.append(message)
+
+        if not message.tool_calls:
+            print(message.content)
             return []
 
+        for call in message.tool_calls:
+            if call.function.name == "scan_environment":
+                print("Starting LiDAR scan...")
+                filename = scanner.scan(filepath=dump_folder)
+                print(f"Scan saved: {filename}")
+                summary = self.summarize_scan_file(filename)
 
-        msg = response.choices[0].message
-        print("[DEBUG] Autopilot.decide_action: Received response from LLM.")
-        print(f"[DEBUG] Full response: {response}")
-        self.update_memory({
-            "role": "assistant",
-             "content": msg.content or ""
-             })
+                tool_result = {
+                    "status": "scan_saved",
+                    "file_path": filename,
+                    "summary": summary
+                }
 
-        print(f"Took {round(time.perf_counter() - start_time, 3)} seconds.")
+                self.memory.append({
+                    "role": "tool",
+                    "tool_call_id": call.id,
+                    "content": json.dumps({
+                        "status": "scan_saved",
+                        "file_path": filename,
+                        "summary": summary
+                    })
+                })
 
-        return msg.tool_calls or []
+                response2 = self.client.chat.completions.create(
+                    model=self.model_name,
+                    messages=self.memory,
+                    tools=Autopilot.aegis_tools,
+                    tool_choice="auto"
+                )
+
+                final_message = response2.choices[0].message
+                self.memory.append(final_message)
+
+                if final_message.content:
+                    print(final_message.content)
+                if final_message.tool_calls:
+
+                    return final_message.tool_calls
+                        
+                return []
+
+        return message.tool_calls
+
+    def summarize_scan_file(self, filename):
+        import math
+
+        zones = {
+            "front": [],
+            "front_right": [],
+            "right": [],
+            "back_right": [],
+            "back": [],
+            "back_left": [],
+            "left": [],
+            "front_left": []
+        }
+
+        total_points = 0
+
+        with open(filename, "r") as f:
+            lines = f.readlines()
+
+        for line in lines:
+            values = line.strip().split()
+
+            if len(values) < 4:
+                continue
+            try:
+                
+                x = float(values[0])
+                y = float(values[1])
+                z = float(values[2])
+                intensity = float(values[3])
+            except ValueError:
+                continue
+            distance = math.sqrt(x**2 + y**2 + z**2)
+            if distance <= 0:
+                continue
+
+            total_points += 1
+
+            # Angle around rover, assuming:
+            # +X = front
+            # +Y = left
+            # -Y = right
+            angle = math.degrees(math.atan2(y, x))
+            
+            # Convert angle to 0-360
+            if angle < 0:
+                angle += 360
+
+            if angle >= 337.5 or angle < 22.5:
+                zones["front"].append(distance)
+            elif 22.5 <= angle < 67.5:
+                zones["front_left"].append(distance)
+            elif 67.5 <= angle < 112.5:
+                zones["left"].append(distance)
+            elif 112.5 <= angle < 157.5:
+                zones["back_left"].append(distance)
+            elif 157.5 <= angle < 202.5:
+                zones["back"].append(distance)
+            elif 202.5 <= angle < 247.5:
+                zones["back_right"].append(distance)
+            elif 247.5 <= angle < 292.5:
+                zones["right"].append(distance)
+            elif 292.5 <= angle < 337.5:
+                zones["front_right"].append(distance)
+
+        if total_points == 0:
+            return {
+                "status": "empty_scan",
+                "scan_ok": False
+            }
+        zone_summary = {}
+
+        for zone_name, distances in zones.items():
+            if distances:
+                zone_summary[zone_name] = {
+                    "points": len(distances),
+                    "min_distance_m": round(min(distances), 2),
+                    "avg_distance_m": round(sum(distances) / len(distances), 2),
+                    "clear": min(distances) > 0.40
+                }
+            else:
+                zone_summary[zone_name] = {
+                    "points": 0,
+                    "min_distance_m": None,
+                    "avg_distance_m": None,
+                    "clear": False
+                }
+
+        clear_zones = [
+            zone for zone, data in zone_summary.items()
+            if data["clear"]
+        ]
+
+        blocked_zones = [
+            zone for zone, data in zone_summary.items()
+            if data["min_distance_m"] is not None and data["min_distance_m"] <= 0.40
+        ]
+
+        clearest_direction = max(
+            zone_summary,
+            key=lambda z: zone_summary[z]["avg_distance_m"] or 0
+        )
+
+        closest_direction = min(
+            [z for z in zone_summary if zone_summary[z]["min_distance_m"] is not None],
+            key=lambda z: zone_summary[z]["min_distance_m"]
+        )
+        return {
+            "status": "scan_saved",
+            "scan_ok": True,
+            "total_points": total_points,
+            "file_path": filename,
+            "zones": zone_summary,
+            "clear_zones": clear_zones,
+            "blocked_zones": blocked_zones,
+            "clearest_direction": clearest_direction,
+            "closest_obstacle_direction": closest_direction,
+            "closest_obstacle_meters": zone_summary[closest_direction]["min_distance_m"]
+        }
 
     def validate_action(self, toolcall, telemetry=None) -> bool:
         """
@@ -193,65 +332,7 @@ class Autopilot:
         name = toolcall.function.name                           # type: ignore
         args = json.loads(toolcall.function.arguments or "{}")  # type: ignore
         
-        if name =="no_op":
-            print(f"calling no_op with args {args}.")
-            return  False
         
-        if name =="scan_enviroment":
-            print("Calling scan_enviroments().")
-            return True
-        
-        if name != "move_rover":
-            print(f"[SAFE] Unknown tool call: {name}")
-            return False
-        
-        print(f"Calling move_rover with args {args}.")
-
-        op = args.get("op")
-        spd = args.get("spd")
-        turn_dir = args.get("turn_dir")
-
-        if op not in {"MOVE", "TURN"}:
-            print("[SAFE] Invalid op.")
-            return false
-
-        if not isinstance(spd, (int, float)):
-            print("[SAFE] Invalid op.")
-            return false
-        
-        if spd <-1 or spd >1:
-            print("[SAFE] Speed outside [-1,1]")
-            return False
-        
-        if abs(spd) > 0.25:
-            print("[SAFE] Speed too high for test.")
-            return False
-
-        if op == "TURN":
-            if turn_dir not in ["LEFT", "RIGHT"]:
-             print("[SAFE] TURN missing valid turn_dir.")
-             return False
-            if spd <= 0:
-             print("[SAFE] TURN speed must be positive.")
-             return False
-            
-        if op == "MOVE":
-        # Optional: block forward movement if front obstacle is close
-            if telemetry is not None and spd > 0:
-              us = telemetry.get("ultrasonics", {})
-              front_vals = [
-                  us.get("left_cm"),
-                   us.get("center_cm"),
-                   us.get("right_cm"),
-                   us.get("lidar_cm")
-                ]
-            valid_front = [x for x in front_vals if isinstance(x, (int, float))]
-
-            if valid_front and min(valid_front) < 35:
-                print("[SAFE] Obstacle too close. Blocking forward MOVE.")
-                return False
-
-        return True
 
     def update_memory(self, msg : dict) -> None:
         """

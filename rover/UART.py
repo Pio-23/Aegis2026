@@ -530,61 +530,18 @@ def give_controls_to_autopilot(serial_conn: Serial, trip_json: str, dump_folder:
     
 
     print("[INI] UART.py: LLM Autopilot Enabled.")
+
     from rover.autopilot import Autopilot
     spartan = Autopilot()
-
-    MIN_BATTERY_VOLTAGE = 15.0
-    MIN_BATTERY_PERCENT = 30
-    MAX_AI_SPEED = 0.35
 
     while tripping:
         telemetry = file_utils.get_latest_telemetry(
             filepath=dump_folder,
             filename=trip_json
         )
-
-        if telemetry is not None:
-            try:
-                battery_voltage = telemetry["ugv"]["battery"]["voltage_v"]
-                battery_percent = telemetry["ugv"]["battery"]["capacity_pct"]
-            except (KeyError, TypeError):
-                print("[SAFE] Battery telemetry missing. Blocking autopilot.")
-                time.sleep(3)
-                continue
-
-            print("[DEBUG] Battery voltage:", battery_voltage)
-            print("[DEBUG] Battery percent:", battery_percent)
-
-            actions = spartan.decide_actions(telemetry)
-
-            for action in actions:
-                if spartan.validate_action(action, telemetry):
-                    if action.function.name == "move_rover":
-                        args = json.loads(action.function.arguments or "{}")
-
-                        op = args.get("op", "")
-                        speed = float(args.get("spd", 0.0))
-
-                        if abs(speed) > MAX_AI_SPEED:
-                            print("[SAFE] AI speed too high. Clamping.")
-                            speed = MAX_AI_SPEED if speed > 0 else -MAX_AI_SPEED
-
-                        if battery_voltage < MIN_BATTERY_VOLTAGE:
-                            print(f"[SAFE] Battery voltage too low ({battery_voltage} V). Blocking movement.")
-                            continue
-
-                        if battery_percent < MIN_BATTERY_PERCENT:
-                            print(f"[SAFE] Battery percent too low ({battery_percent}%). Blocking movement.")
-                            continue
-
-                        if op == "MOVE":
-                            serial_conn.write(generate_command(op="MOVE", spd=speed))
-
-                        elif op == "TURN":
-                            turn_dir = args.get("turn_dir", "LEFT")
-                            serial_conn.write(generate_command(op="TURN", turn_dir=turn_dir, spd=abs(speed)))
-
-                    elif action.function.name == "scan_environment":
+        actions = spartan.decide_actions(telemetry, scanner, dump_folder)
+        for action in actions:
+                if action.function.name == "scan_environment":
                         scanner.scan(filepath=dump_folder)
 
         time.sleep(3)
