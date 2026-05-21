@@ -1,1 +1,4 @@
+<<<<<<< HEAD
 Automated Environmental Ground Imaging System - CSUN 2025 Senior Design Project
+=======
+# Aegis2026
