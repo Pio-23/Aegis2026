@@ -34,6 +34,13 @@ class Autopilot:
     - whether the rover should stay still or move
 
     Do not assume a direction is clear unless the scan summary says it is clear.
+    You also have access to a rover camera.
+
+    Use capture_camera when visual information would help identify objects,
+    openings, doors, terrain, or anything LiDAR geometry alone cannot explain.
+
+    Use LiDAR for distance and obstacle geometry.
+    Use the camera for visual understanding.
     If you are unsure about the environment or what to do, ask for another LiDAR scan.
     """
     context_msg: dict[str, str] = {"role": "system", "content": system_context}
@@ -57,6 +64,21 @@ class Autopilot:
                     "required": []
                 },
             }
+        },
+        {
+             "type": "function",
+              "function": {
+                 "name": "capture_camera",
+                 "description": (
+                     "Capture a still image from the rover camera when visual "
+                     "information would help understand the environment."
+                  ),
+                   "parameters": {
+                       "type": "object",
+                       "properties": {},
+                       "required": []
+                   }
+             }
         },
         {
             "type": "function",
@@ -137,7 +159,7 @@ class Autopilot:
         api_key=os.getenv("OPENAI_API_KEY")
         )
 
-    def decide_actions(self, telemetry, scanner, dump_folder):
+    def decide_actions(self, telemetry, scanner, ugv_cam, dump_folder):
         """
         Ask GPT what to do.
         If GPT requests a LiDAR scan, perform the scan,
@@ -160,47 +182,77 @@ class Autopilot:
             return []
 
         for call in message.tool_calls:
+
             if call.function.name == "scan_environment":
                 print("Starting LiDAR scan...")
+
                 filename = scanner.scan(filepath=dump_folder)
                 print(f"Scan saved: {filename}")
-                summary = self.summarize_scan_file(filename)
 
-                tool_result = {
-                    "status": "scan_saved",
-                    "file_path": filename,
-                    "summary": summary
-                }
+                summary = self.summarize_scan_file(filename)
 
                 self.memory.append({
                     "role": "tool",
                     "tool_call_id": call.id,
                     "content": json.dumps({
-                        "status": "scan_saved",
-                        "file_path": filename,
-                        "summary": summary
+                       "status": "scan_saved",
+                       "file_path": filename,
+                       "summary": summary
                     })
                 })
 
-                response2 = self.client.chat.completions.create(
-                    model=self.model_name,
-                    messages=self.memory,
-                    tools=Autopilot.aegis_tools,
-                    tool_choice="auto"
-                )
+            elif call.function.name == "capture_camera":
 
-                final_message = response2.choices[0].message
-                self.memory.append(final_message)
+                print("[AI] GPT requested camera image...")
 
-                if final_message.content:
-                    print(final_message.content)
-                if final_message.tool_calls:
+                if ugv_cam is None or not ugv_cam.connected:
+                    tool_result = {
+                        "status": "failed",
+                        "reason": "Camera is not connected"
+                    }
 
-                    return final_message.tool_calls
-                        
-                return []
+                else:
+                    filename = ugv_cam.capture_image(
+                        filepath=dump_folder
+                    )
 
-        return message.tool_calls
+                    if filename is None:
+                        tool_result = {
+                            "status": "failed",
+                            "reason": "Camera capture failed"
+                        }
+
+                    else:
+                        print(f"[AI] Camera image saved: {filename}")
+
+                        tool_result = {
+                            "status": "image_saved",
+                            "file_path": filename
+                        }
+
+                self.memory.append({
+                    "role": "tool",
+                    "tool_call_id": call.id,
+                    "content": json.dumps(tool_result)
+                })
+
+        response2 = self.client.chat.completions.create(
+            model=self.model_name,
+            messages=self.memory,
+            tools=Autopilot.aegis_tools,
+            tool_choice="auto"
+        )
+
+        final_message = response2.choices[0].message
+        self.memory.append(final_message)
+
+        if final_message.content:
+            print(final_message.content)
+
+        if final_message.tool_calls:
+            return final_message.tool_calls
+
+        return []
 
     def summarize_scan_file(self, filename):
         import math
@@ -332,7 +384,18 @@ class Autopilot:
         name = toolcall.function.name                           # type: ignore
         args = json.loads(toolcall.function.arguments or "{}")  # type: ignore
         
-        
+    
+    def add_tool_result(self, tool_call_id, result):
+        """
+        Record the result of a tool that was executed outside Autopilot,
+        such as move_rover in UART.py.
+        """
+        self.update_memory({
+            "role": "tool",
+            "tool_call_id": tool_call_id,
+            "content": json.dumps(result)
+        })
+
 
     def update_memory(self, msg : dict) -> None:
         """
@@ -340,4 +403,5 @@ class Autopilot:
         """
         if (len(self.memory) > self.memory_depth):
             self.memory.pop(1)  # Remove oldest, keep system context
+            
         self.memory.append(msg)

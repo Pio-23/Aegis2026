@@ -21,11 +21,13 @@ INPUT_BUFFER_SECONDS = 0.1
 STICK_MOVE_THRESHOLD = 0.05         # Fixes stick drift
 
 LLM_DRIVE_ENABLED = True # If True, disables manual control for LLM autopilot
+HUMAN_APPROVAL = False #temporal for the rover to take aproval from user before executing any action
 
 emergency_stop = False
 
 tripping: bool = False
 scanner = scan.Scanner()
+ugv_cam = camera.Camera()
 
 def get_cpu_util() -> float:
     """
@@ -526,8 +528,7 @@ def generate_command(op : str, **kwargs) -> bytes | None:
     except OverflowError:
         print("[ERR] UART.py: Invalid command generated!")
 
-def give_controls_to_autopilot(serial_conn: Serial, trip_json: str, dump_folder: str, tripping: bool) -> None:
-    
+def give_controls_to_autopilot(serial_conn: Serial, trip_json: str, dump_folder: str, tripping: bool ) -> None:
 
     print("[INI] UART.py: LLM Autopilot Enabled.")
 
@@ -535,14 +536,164 @@ def give_controls_to_autopilot(serial_conn: Serial, trip_json: str, dump_folder:
     spartan = Autopilot()
 
     while tripping:
+
         telemetry = file_utils.get_latest_telemetry(
             filepath=dump_folder,
             filename=trip_json
         )
-        actions = spartan.decide_actions(telemetry, scanner, dump_folder)
+
+        actions = spartan.decide_actions(
+            telemetry,
+            scanner,
+            ugv_cam,
+            dump_folder
+        )
+
         for action in actions:
-                if action.function.name == "scan_environment":
-                        scanner.scan(filepath=dump_folder)
+
+            name = action.function.name
+            args = json.loads(
+                action.function.arguments or "{}"
+            )
+
+            if name == "move_rover":
+
+                print("[AI] GPT requested rover movement:")
+                print(args)
+
+
+                # Human approval mode
+                if HUMAN_APPROVAL:
+                     confirmation = input(
+                         "[AI] Allow this movement? [y/N]: "
+                     ).strip().lower()
+
+                     if confirmation not in ("y", "yes"):
+                         print("[AI] Movement rejected by operator.")
+
+                         spartan.add_tool_result(
+                             action.id,
+                            {
+                              "status": "rejected",
+                              "reason": "Operator rejected movement."
+                            }
+                         )
+
+                         continue
+
+                if emergency_stop:
+                    print("[SAFE] AI movement blocked by emergency stop.")
+
+                    serial_conn.write(
+                        generate_command(
+                            op="MOVE",
+                            spd=0.0
+                        )
+                    )
+
+                    spartan.add_tool_result(
+                        action.id,
+                        {
+                            "status": "blocked",
+                            "reason": "Emergency stop active"
+                        }
+                    )
+
+                    continue
+
+                op = args.get("op")
+                spd = args.get("spd", 0.0)
+                turn_dir = args.get("turn_dir")
+
+                try:
+
+                    if op == "MOVE":
+
+                        command = generate_command(
+                            op="MOVE",
+                            spd=spd
+                        )
+
+                    elif op == "TURN":
+
+                        command = generate_command(
+                            op="TURN",
+                            spd=spd,
+                            turn_dir=turn_dir
+                        )
+
+                    else:
+                        print(
+                            f"[ERR] Unknown AI movement operation: {op}"
+                        )
+
+                        spartan.add_tool_result(
+                            action.id,
+                            {
+                                "status": "failed",
+                                "reason": f"Unknown operation: {op}"
+                            }
+                        )
+
+                        continue
+
+                    if command is not None:
+                        serial_conn.write(command)
+
+                        print(
+                            f"[AI] Command sent to rover: {args}"
+                        )
+
+                        spartan.add_tool_result(
+                            action.id,
+                            {
+                                "status": "completed",
+                                "command": args
+                            }
+                        )
+
+                    else:
+                        spartan.add_tool_result(
+                            action.id,
+                            {
+                                "status": "failed",
+                                "reason": "generate_command returned None"
+                            }
+                        )
+
+                except Exception as e:
+
+                    print(
+                        f"[ERR] AI movement failed: {e}"
+                    )
+
+                    spartan.add_tool_result(
+                        action.id,
+                        {
+                            "status": "failed",
+                            "reason": str(e)
+                        }
+                    )
+
+            elif name == "no_op":
+
+                print("[AI] GPT decided not to move.")
+                print(args)
+
+                serial_conn.write(
+                    generate_command(
+                        op="MOVE",
+                        spd=0.0
+                    )
+                )
+
+                spartan.add_tool_result(
+                    action.id,
+                    {
+                        "status": "completed",
+                        "result": "Rover remained stationary"
+                    }
+                )
 
         time.sleep(3)
 
