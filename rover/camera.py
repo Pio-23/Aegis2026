@@ -33,11 +33,10 @@ class Camera(Picamera2):
             self.configure(self.create_video_configuration(
                 main={"size": (1280, 720), "format": "YUV420"}
             ))
-        except:
+        except Exception as e:
             set_pixel(CAM_ADDR, PX_WHITE)
-            print("[ERR] camera.py: No camera detected!")
+            print(f"[ERR] camera.py: Camera initialization failed: {e}")
             self.connected = False
-
         self.recording = False
 
     def my_start_recording(self) -> str | None:
@@ -77,6 +76,36 @@ class Camera(Picamera2):
             self.recording = False
         else:
             print("[RUN_ERROR] camera.py: Camera is not recording!")
+
+    def capture_image(self, filepath: str) -> str | None:
+        """
+        Capture a still image and save it to the specified folder.
+        """
+
+        if not self.connected:
+            print("[ERR] camera.py: Camera is not connected.")
+            return None
+
+        filename = get_timestamped_filename(
+            save_path=filepath,
+            prefix="camera",
+            ext=".jpg"
+        )
+
+        try:
+            self.start()
+            sleep(0.5)
+
+            self.capture_file(filename)
+
+            self.stop()
+
+            print(f"[RUN] camera.py: Image saved to {filename}")
+            return filename
+
+        except Exception as e:
+            print(f"[ERR] camera.py: Image capture failed: {e}")
+            return None
 #Endclass
 
 def record_test(seconds : int) -> None:

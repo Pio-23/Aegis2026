@@ -9,6 +9,7 @@ import os
 import time
 import json
 
+
 from utils import serial_utils      # UGV_BAUDRATE
 from utils import file_utils        # make_telemetry_JSON(), update_telemetry_JSON(), TRIPS_FOLDER
 from utils.led_utils import *       # map_ultrasonic_to_pixel()
@@ -27,7 +28,7 @@ emergency_stop = False
 
 tripping: bool = False
 scanner = scan.Scanner()
-ugv_cam = camera.Camera()
+#ugv_cam = camera.Camera()
 
 def get_cpu_util() -> float:
     """
@@ -528,7 +529,7 @@ def generate_command(op : str, **kwargs) -> bytes | None:
     except OverflowError:
         print("[ERR] UART.py: Invalid command generated!")
 
-def give_controls_to_autopilot(serial_conn: Serial, trip_json: str, dump_folder: str, tripping: bool ) -> None:
+def give_controls_to_autopilot(serial_conn: Serial, trip_json: str, dump_folder: str, tripping: bool, ugv_cam ) -> None:
 
     print("[INI] UART.py: LLM Autopilot Enabled.")
 
@@ -706,6 +707,15 @@ def run_comms() -> None:
     """
     
     tripping = True
+
+    # Create camera inside UART subprocess
+    ugv_cam = camera.Camera()
+
+    if ugv_cam.connected:
+        print("[INI] UART.py: Camera connected.")
+    else:
+        print("[ERR] UART.py: Camera unavailable.")
+
     trip_start_timestamp: str = file_utils.get_current_timestamp()
     trip_folder: str = file_utils.make_folder(
         file_utils.TRIPS_FOLDER, trip_start_timestamp)
@@ -716,13 +726,16 @@ def run_comms() -> None:
 
     serial_conn: Serial = open_serial_connection()
 
+    tripping = True
+
     if LLM_DRIVE_ENABLED:
         autopilot_thread = Thread(target=give_controls_to_autopilot,
                                     args=[
                                         serial_conn,
                                         trip_json,
                                         trip_folder,
-                                        tripping
+                                        tripping,
+                                        ugv_cam
                                     ],
             daemon=True
         )

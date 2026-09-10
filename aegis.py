@@ -5,10 +5,11 @@ from multiprocessing import Process
 import atexit
 
 from utils.led_utils import *
-from rover import UART, camera
-from stream import web_viewer as site
+#from rover import UART, camera t//this is removed so camera will work without UART and no streaming 
+from rover import UART 
+#from stream import web_viewer as site //this one is removed so camera will work without UART and no streaming
 
-cam = camera.Camera()
+#cam = camera.Camera()  //this one is also rule out for now
 #cam.my_start_recording()
 
 @atexit.register
