@@ -89,6 +89,22 @@ class Autopilot:
     - If sensor information conflicts, gather additional information instead
         of guessing.
 
+    SENSOR STATE INTERPRETATION
+
+    - lidar.scanning only indicates whether a LiDAR scan is currently
+    being captured.
+    - lidar.scanning = false does NOT mean LiDAR is unavailable.
+    - A completed LiDAR summary remains valid until new sensor information
+    indicates that the environment has changed or a new scan is required.
+
+    - If a camera image has successfully been provided in the current
+    observation cycle, treat that image as valid camera information.
+    - Do not claim that the camera is disconnected when a current image
+    was successfully captured and provided.
+
+    - Always prefer the most recent completed LiDAR summary, camera image,
+    and fresh ultrasonic telemetry over temporary sensor activity flags.
+
     MOVEMENT RULES
 
     - Issue only ONE physical movement command at a time.
@@ -97,6 +113,16 @@ class Autopilot:
     - Do not repeatedly issue movement commands without updated sensor information.
     - Never move toward a blocked direction.
     - If there is no safe movement, stay stationary.
+
+    ROVER MOTION MODEL
+
+    - The rover uses skid-steer differential drive.
+    - It cannot move sideways or strafe.
+    - To travel toward the left or right, first use TURN to rotate the
+    rover toward that direction, then use MOVE.
+    - TURN means spin/rotate the rover in place.
+    - Turning requires more motor torque than straight movement.
+    - Do not request extremely low turn speeds.
 
     RE-SCANNING RULES
 
@@ -242,7 +268,38 @@ class Autopilot:
         with open(filename, "rb") as image_file:
             return base64.b64encode(image_file.read()).decode("utf-8")
 
-    def decide_actions(self, telemetry, scanner, ugv_cam, dump_folder):
+    def summarize_telemetry(self, telemetry):
+        """
+        Return only the ultrasonic sensor data needed for navigation.
+        """
+
+        if not isinstance(telemetry, dict):
+            return {
+                "ultrasonic": {
+                    "front_left_cm": None,
+                    "front_center_cm": None,
+                    "front_right_cm": None,
+                    "rear_cm": None,
+                    "lidar_mount_cm": None
+                },
+                "telemetry_valid": False
+            }
+
+        ultrasonics = telemetry.get("ultrasonics", {})
+
+        return {
+            "ultrasonic": {
+                "front_left_cm": ultrasonics.get("left_cm"),
+                "front_center_cm": ultrasonics.get("center_cm"),
+                "front_right_cm": ultrasonics.get("right_cm"),
+                "rear_cm": ultrasonics.get("rear_cm"),
+                "lidar_mount_cm": ultrasonics.get("lidar_cm")
+            },
+            "telemetry_valid": True
+        }
+    
+
+    def decide_actions(self, telemetry, scanner, ugv_cam, dump_folder, get_current_telemetry):
         """
         Ask GPT what to do.
         If GPT requests a LiDAR scan, perform the scan,
@@ -250,10 +307,13 @@ class Autopilot:
         then ask GPT again.
         """
 
+        sensor_summary = self.summarize_telemetry(telemetry)
+        
         self .update_memory({
             "role": "user",
             "content": json.dumps({
                 "telemetry": telemetry,
+                "sensor_summary": sensor_summary,
             })
         })
 
@@ -271,7 +331,7 @@ class Autopilot:
 
             message = response.choices[0].message
 
-            self.memory.append(message)
+            self.update_memory(message)
 
             if message.content:
                 print(message.content)
@@ -295,17 +355,17 @@ class Autopilot:
                 if name == "scan_environment":
                     print("Starting LiDAR scan...")
 
-                    filename = scanner.scan(filepath=dump_folder)
-                    print(f"Scan saved: {filename}")
+                    lidar_filename = scanner.scan(filepath=dump_folder)
+                    print(f"Scan saved: {lidar_filename}")
 
-                    summary = self.summarize_scan_file(filename)
+                    summary = self.summarize_scan_file(lidar_filename)
 
                     self.memory.append({
                         "role": "tool",
                         "tool_call_id": call.id,
                         "content": json.dumps({
                             "status": "scan_saved",
-                            "file_path": filename,
+                            "file_path": lidar_filename,
                             "summary": summary
                         })
                     })
@@ -314,6 +374,78 @@ class Autopilot:
                         f"[AI] GPT requested LiDAR scan. Scan complete and summarized."
                         f"for {call.id}" 
                     )
+
+                # ==========================================
+                # AUTOMATIC CAMERA CAPTURE AFTER LIDAR
+                # ==========================================
+
+                    if ugv_cam is not None and ugv_cam.connected:
+                        print("[AI] Capturing camera image after LiDAR scan.")
+
+                        camera_filename = ugv_cam.capture_image(
+                            filepath=dump_folder
+                        )
+
+                        if camera_filename is not None:
+                            print(f"[AI] Camera image saved: {camera_filename}")
+
+                            image_base64 = self.encode_image(camera_filename)
+
+                            self.memory.append({
+                                "role": "user",
+                                "content": [
+                                    {
+                                        "type": "text",
+                                        "text": (
+                                            "This is the latest rover camera image. "
+                                            "Analyze it together with the latest LiDAR scan. "
+                                            "information. Identify obstacles, openings, doors, hallways,"
+                                            "terrain, and anything useful for navigation. "
+                                            "Use what you see to decide the safest next action."
+                                        )
+                                    },
+                                    {
+                                        "type": "image_url",
+                                        "image_url": {
+                                            "url": "data:image/jpeg;base64," + image_base64,
+                                            "detail": "low"
+                                        }
+                                    }
+                                ]
+                            })
+
+                            print(
+                                f"[AI] GPT requested camera capture after LiDAR scan. "
+                                f"Image saved and sent to GPT for {call.id}"
+                            )
+
+                        else: 
+                            print("[AI] Camera capture failed after LiDAR scan.")
+
+                    else: 
+                        print("[AI] Camera not connected, skipping capture after LiDAR scan.")
+
+
+                    fresh_telemetry = get_current_telemetry()
+
+                    if isinstance(fresh_telemetry, dict):
+                        fresh_sensor_summary = self.summarize_telemetry(fresh_telemetry)
+
+                        self.update_memory({
+                            "role": "user",
+                            "content": json.dumps({
+                                "telemetry": fresh_telemetry,
+                                "sensor_summary": fresh_sensor_summary,
+                                "observation": ("This is the latest telemetry after the LiDAR scan and camera scan"
+                                "use this ultrasonic readings to decide the next movement."
+                                )
+                            })
+                        })
+
+                        print("[AI] Updated memory with fresh telemetry after LiDAR scan and camera capture.")
+
+                    else:
+                        print("[AI] Failed to retrieve fresh telemetry after LiDAR scan and camera capture.")
 
                     continue
 
@@ -451,6 +583,7 @@ class Autopilot:
 
     def summarize_scan_file(self, filename):
         import math
+        import numpy as np
 
         zones = {
             "front": [],
@@ -523,16 +656,25 @@ class Autopilot:
 
         for zone_name, distances in zones.items():
             if distances:
+                
+                absolute_min = min(distances)
+
+                near_distance = float(np.percentile(distances, 5))
+
+                avg_distance = sum(distances) / len(distances)
+
                 zone_summary[zone_name] = {
                     "points": len(distances),
-                    "min_distance_m": round(min(distances), 2),
-                    "avg_distance_m": round(sum(distances) / len(distances), 2),
-                    "clear": min(distances) > 0.40
+                    "absolute_min_m": round(absolute_min, 2),
+                    "near_distance_m": round(near_distance, 2),
+                    "avg_distance_m": round(avg_distance, 2),
+                    "clear": near_distance > 0.40
                 }
             else:
                 zone_summary[zone_name] = {
                     "points": 0,
-                    "min_distance_m": None,
+                    "absolute_min_m": None,
+                    "near_distance_m": None,
                     "avg_distance_m": None,
                     "clear": False
                 }
@@ -544,17 +686,19 @@ class Autopilot:
 
         blocked_zones = [
             zone for zone, data in zone_summary.items()
-            if data["min_distance_m"] is not None and data["min_distance_m"] <= 0.40
+            if data["near_distance_m"] is not None and data["near_distance_m"] <= 0.40
         ]
 
         clearest_direction = max(
             zone_summary,
-            key=lambda z: zone_summary[z]["avg_distance_m"] or 0
+            key=lambda z: zone_summary[z]["near_distance_m"] or 0
         )
 
         closest_direction = min(
-            [z for z in zone_summary if zone_summary[z]["min_distance_m"] is not None],
-            key=lambda z: zone_summary[z]["min_distance_m"]
+            [
+                z for z in zone_summary if zone_summary[z]["near_distance_m"] is not None
+            ],
+            key=lambda z: zone_summary[z]["near_distance_m"]
         )
         return {
             "status": "scan_saved",
@@ -566,7 +710,7 @@ class Autopilot:
             "blocked_zones": blocked_zones,
             "clearest_direction": clearest_direction,
             "closest_obstacle_direction": closest_direction,
-            "closest_obstacle_meters": zone_summary[closest_direction]["min_distance_m"]
+            "closest_obstacle_meters": zone_summary[closest_direction]["near_distance_m"]
         }
 
     def validate_action(self, toolcall, telemetry=None) -> bool:
@@ -592,11 +736,69 @@ class Autopilot:
         })
 
 
-    def update_memory(self, msg : dict) -> None:
+    def update_memory(self, msg):
+        
         """
-        Update the internal memory with a new message.
+        Add a message and safely trim old memory without
+        separating tool calls from their tool responses.
         """
-        if (len(self.memory) > self.memory_depth):
-            self.memory.pop(1)  # Remove oldest, keep system context
-            
+
         self.memory.append(msg)
+
+        while len(self.memory) > self.memory_depth:
+
+            if len(self.memory) <= 1:
+                break
+
+            oldest = self.memory[1]
+
+            # Get role whether this is a normal dict
+            # or an OpenAI message object
+            if isinstance(oldest, dict):
+                role = oldest.get("role")
+                tool_calls = oldest.get("tool_calls")
+            else:
+                role = getattr(oldest, "role", None)
+                tool_calls = getattr(oldest, "tool_calls", None)
+
+            # If removing an assistant tool call,
+            # also remove its matching tool response(s)
+            if role == "assistant" and tool_calls:
+
+                tool_ids = {
+                    call.id for call in tool_calls
+                }
+
+                self.memory.pop(1)
+
+                while len(self.memory) > 1:
+
+                    next_msg = self.memory[1]
+
+                    if isinstance(next_msg, dict):
+                        next_role = next_msg.get("role")
+                        next_tool_id = next_msg.get(
+                            "tool_call_id"
+                        )
+                    else:
+                        next_role = getattr(
+                            next_msg,
+                            "role",
+                            None
+                        )
+                        next_tool_id = getattr(
+                            next_msg,
+                            "tool_call_id",
+                            None
+                        )
+
+                    if (
+                        next_role == "tool"
+                        and next_tool_id in tool_ids
+                    ):
+                        self.memory.pop(1)
+                    else:
+                        break
+
+            else:
+                self.memory.pop(1)

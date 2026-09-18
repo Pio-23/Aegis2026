@@ -104,7 +104,7 @@ def read_data(serial_conn : Serial) -> bytes | None:
     else:
         raise RuntimeError("Attempted to read from closed serial port!")
     
-def listen_to_UGV(serial_conn: Serial, trip_json : str, dump_folder: str, controller_thread : Thread) -> None:
+def listen_to_UGV(serial_conn: Serial, trip_json : str, dump_folder: str, controller_thread : Thread, ugv_cam) -> None:
     """
     Captures telemetry data from the Arduino and writes it to the trip's 
     telemetry JSON file. If the data is malformed, skips the frame.
@@ -124,23 +124,25 @@ def listen_to_UGV(serial_conn: Serial, trip_json : str, dump_folder: str, contro
         ugv_data: bytes = serial_conn.read_until(expected=b'\n')
 
         try:
-            tel_dict = process_telemetry(ugv_data)
+            tel_dict = process_telemetry(ugv_data, ugv_cam)
 
             filename: str = file_utils.update_telemetry_JSON(
                 filepath=dump_folder, filename=trip_json, telemetry=tel_dict)
 
         except RuntimeError:
             print("[ERR] UART.py: INVALID ARDUINO TELEMETRY (BADLEN)\n")
+            print(f"[DEBUG] Raw Arduino frame: {ugv_data!r}")
         
         set_pixel(ARD_ADDR, PX_OFF) # MIGHT BE TOO QUICK TO OBSERVE
    
-def process_telemetry(data: bytes) -> dict:
+def process_telemetry(data: bytes, ugv_cam=None) -> dict:
     """
     Converts the bytestream from the Arduino into key-value pairs inside of a 
     telemetry dictionary. This is terrible and I'm sorry.
 
     Args:
         data (bytes): The unprocessed telemetry byte array from the Arduino.
+        ugv_cam: The camera object for the UGV.
     Returns:
         telemetry (dict): The dictionary of telemetry key-value pairs.
     Raises:
@@ -283,8 +285,12 @@ def process_telemetry(data: bytes) -> dict:
             "motor_pos_deg": scanner.motor.curr_angle
         },
         "camera": {
-            "connected": False,
-            "recording": False,
+            "connected": (
+                ugv_cam is not None and ugv_cam.connected
+            ),
+            "recording": (
+                ugv_cam is not None and ugv_cam.recording
+            ),
         },
         "motors": {
             "front_left": {
@@ -529,12 +535,115 @@ def generate_command(op : str, **kwargs) -> bytes | None:
     except OverflowError:
         print("[ERR] UART.py: Invalid command generated!")
 
+
+#this is for constant movement if it doesnt work remove it and change other stuff
+def execute_supervised_movement(serial_conn, command, args, get_current_telemetry, duration_s=1.5 ):
+    """
+    Continuously resend an AI movement command for a short period
+    while monitoring ultrasonic telemetry.
+
+    Stops early if an obstacle becomes too close or telemetry is lost.
+    """
+
+    global emergency_stop
+
+    start_time = time.time()
+
+    # Temporary safety distances.
+    # We can tune these after checking the ultrasonic sensors.
+    FRONT_STOP_CM = 35.0
+    REAR_STOP_CM = 35.0
+
+    while (time.time() - start_time) < duration_s:
+
+        # Controller emergency stop always wins
+        if emergency_stop:
+            print("[SAFE] Emergency stop during AI movement.")
+            break
+
+        telemetry = get_current_telemetry()
+
+        if not isinstance(telemetry, dict):
+            print("[SAFE] Telemetry lost during movement.")
+            break
+
+        ultrasonics = telemetry.get("ultrasonics", {})
+
+        left = ultrasonics.get("left_cm")
+        center = ultrasonics.get("center_cm")
+        right = ultrasonics.get("right_cm")
+        rear = ultrasonics.get("rear_cm")
+
+        op = args.get("op")
+        spd = args.get("spd", 0.0)
+
+        # ------------------------------------------
+        # FORWARD SAFETY
+        # ------------------------------------------
+
+        if op == "MOVE" and spd > 0:
+
+            front_readings = [
+                value for value in [left, center, right]
+                if value is not None and value > 0
+            ]
+
+            if (
+                front_readings
+                and min(front_readings) < FRONT_STOP_CM
+            ):
+                print(
+                    "[SAFE] Front ultrasonic obstacle detected. "
+                    "Stopping movement."
+                )
+                break
+
+        # ------------------------------------------
+        # REVERSE SAFETY
+        # ------------------------------------------
+
+        if op == "MOVE" and spd < 0:
+
+            if (
+                rear is not None
+                and rear > 0
+                and rear < REAR_STOP_CM
+            ):
+                print(
+                    "[SAFE] Rear ultrasonic obstacle detected. "
+                    "Stopping movement."
+                )
+                break
+
+        # Keep sending the same movement command
+        serial_conn.write(command)
+
+        # Roughly 10 Hz, similar to manual control behavior
+        time.sleep(0.1)
+
+    # ALWAYS stop at the end of the segment
+    serial_conn.write(
+        generate_command(
+            op="MOVE",
+            spd=0.0
+        )
+    )
+
+    print("[AI] Supervised movement segment completed.")
+
+
 def give_controls_to_autopilot(serial_conn: Serial, trip_json: str, dump_folder: str, tripping: bool, ugv_cam ) -> None:
 
     print("[INI] UART.py: LLM Autopilot Enabled.")
 
     from rover.autopilot import Autopilot
     spartan = Autopilot()
+
+    def get_current_telemetry():
+        return file_utils.get_latest_telemetry(
+            filepath=dump_folder,
+            filename=trip_json
+        )
 
     while tripping:
 
@@ -543,11 +652,24 @@ def give_controls_to_autopilot(serial_conn: Serial, trip_json: str, dump_folder:
             filename=trip_json
         )
 
+        if telemetry is None:
+            print("[ERR] UART.py: No telemetry available for autopilot.")
+
+            serial_conn.write(
+                generate_command(
+                    op="MOVE",
+                    spd=0.0
+                )   
+            )
+            time.sleep(0.2)
+            continue
+
         actions = spartan.decide_actions(
             telemetry,
             scanner,
             ugv_cam,
-            dump_folder
+            dump_folder,
+            get_current_telemetry
         )
 
         for action in actions:
@@ -561,26 +683,6 @@ def give_controls_to_autopilot(serial_conn: Serial, trip_json: str, dump_folder:
 
                 print("[AI] GPT requested rover movement:")
                 print(args)
-
-
-                # Human approval mode
-                if HUMAN_APPROVAL:
-                     confirmation = input(
-                         "[AI] Allow this movement? [y/N]: "
-                     ).strip().lower()
-
-                     if confirmation not in ("y", "yes"):
-                         print("[AI] Movement rejected by operator.")
-
-                         spartan.add_tool_result(
-                             action.id,
-                            {
-                              "status": "rejected",
-                              "reason": "Operator rejected movement."
-                            }
-                         )
-
-                         continue
 
                 if emergency_stop:
                     print("[SAFE] AI movement blocked by emergency stop.")
@@ -616,6 +718,10 @@ def give_controls_to_autopilot(serial_conn: Serial, trip_json: str, dump_folder:
                         )
 
                     elif op == "TURN":
+                        
+                        if 0 < abs(spd) < 0.70:
+                            spd = 0.70
+                            args["spd"] = spd
 
                         command = generate_command(
                             op="TURN",
@@ -639,17 +745,31 @@ def give_controls_to_autopilot(serial_conn: Serial, trip_json: str, dump_folder:
                         continue
 
                     if command is not None:
-                        serial_conn.write(command)
+                        #this stuff too is for the constant movement if it doesnt work remove it and change other stuff
+                        print(
+                            f"[AI] Executing supervised movement: {args}"
+                        )
 
                         print(
-                            f"[AI] Command sent to rover: {args}"
+                            f"[DEBUG] Sending command byte: "
+                            f"{int.from_bytes(command, 'big')} "
+                            f"binary={int.from_bytes(command, 'big'):08b}"
+                        )
+
+                        execute_supervised_movement(
+                            serial_conn=serial_conn,
+                            command=command,
+                            args=args,
+                            get_current_telemetry=get_current_telemetry,
+                            duration_s=1.5
                         )
 
                         spartan.add_tool_result(
                             action.id,
                             {
                                 "status": "completed",
-                                "command": args
+                                "command": args,
+                                "movement_duration_s": 1.5
                             }
                         )
 
@@ -728,19 +848,6 @@ def run_comms() -> None:
 
     tripping = True
 
-    if LLM_DRIVE_ENABLED:
-        autopilot_thread = Thread(target=give_controls_to_autopilot,
-                                    args=[
-                                        serial_conn,
-                                        trip_json,
-                                        trip_folder,
-                                        tripping,
-                                        ugv_cam
-                                    ],
-            daemon=True
-        )
-        autopilot_thread.start()
-
     controller_thread = Thread(target=control_UGV,
                                 args=[
                                     serial_conn,
@@ -755,11 +862,29 @@ def run_comms() -> None:
                                     serial_conn, 
                                     trip_json, 
                                     trip_folder, 
-                                    controller_thread
+                                    controller_thread,
+                                    ugv_cam
                                 ]
     )
 
     controller_thread.start()   # Background thread, exit signals tel exit
 
     telemetry_thread.start()
+
+    time.sleep(0.5) #little delay
+
+    #moves this to last to ahv ethe telemetry generated first and then start the LLM thread, so it has telemetry to work with
+    if LLM_DRIVE_ENABLED: 
+        autopilot_thread = Thread(target=give_controls_to_autopilot,
+                                    args=[
+                                        serial_conn,
+                                        trip_json,
+                                        trip_folder,
+                                        tripping,
+                                        ugv_cam
+                                    ],
+            daemon=True
+        )
+        autopilot_thread.start()
+
     telemetry_thread.join()
