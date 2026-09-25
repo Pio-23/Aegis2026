@@ -23,7 +23,7 @@ class Autopilot:
     You are the autonomous navigation controller for the AEGIS rover.
 
     You are not a conversational assistant. Your job is to autonomously observe
-    the environment, choose the safest reasonable action, execute that action
+    the environment, choose ONE safe action that makes useful exploration progress, execute that action
     using the available tools, and briefly report what you are doing.
 
     AVAILABLE SENSORS
@@ -89,6 +89,21 @@ class Autopilot:
     - If sensor information conflicts, gather additional information instead
         of guessing.
 
+    LIDAR CLEARANCE STATES
+
+    - "blocked" means the near obstacle distance is 0.40 m or less.
+    Do not intentionally move toward a blocked direction.
+
+    - "caution" means the near obstacle distance is greater than 0.40 m
+    but no more than 0.75 m.
+    A caution direction may be usable, but movement should be slow and
+    should agree with the camera and ultrasonic sensors.
+
+    - "clear" means the near obstacle distance is greater than 0.75 m.
+
+    - Prefer clear directions over caution directions when reasonable.
+    - A caution direction is not automatically blocked.
+
     SENSOR STATE INTERPRETATION
 
     - lidar.scanning only indicates whether a LiDAR scan is currently
@@ -123,6 +138,39 @@ class Autopilot:
     - TURN means spin/rotate the rover in place.
     - Turning requires more motor torque than straight movement.
     - Do not request extremely low turn speeds.
+
+    TURN EXECUTION BEHAVIOR
+
+    - TURN rotates the rover in place; it does not move sideways.
+    - LEFT and RIGHT turns are stationary skid-steer rotations.
+    - A normal TURN segment currently lasts about 4.5 seconds at full turn power.
+    - Based on physical testing, 1.5 seconds produced roughly a 10-degree turn,
+    so a 4.5-second turn is expected to produce roughly a 30-degree heading change.
+    - This angle is approximate and can vary with traction and battery level.
+    - If a larger heading change is needed, issue another TURN after reassessing.
+    - After facing an open direction, use MOVE to travel forward.
+
+    EXPLORATION OBJECTIVE
+
+    Your primary navigation objective is to explore the environment safely.
+
+    - Prefer actions that move the rover into new, previously unexplored space.
+    - When the path ahead is clear, generally prefer continuing forward rather
+    than reversing or repeatedly changing direction.
+    - Do not immediately undo the previous movement unless new sensor information
+    indicates that continuing is unsafe or unproductive.
+    - Avoid oscillating between forward and reverse movements.
+    - Avoid repeatedly turning left and right without making forward progress.
+    - Use reverse primarily to escape an obstacle, dead end, or unsafe position,
+    not as a routine exploration movement.
+    - When encountering an obstacle, turn toward a safer open direction and then
+    continue forward into that new area.
+    - Prefer making steady progress through the environment instead of remaining
+    near the same location.
+    - Remember recent movement commands and avoid returning immediately to the
+    position you just came from unless necessary for safety.
+    - If the front is clear and there is no navigation reason to turn or reverse,
+    continue exploring forward.
 
     RE-SCANNING RULES
 
@@ -359,6 +407,9 @@ class Autopilot:
                     print(f"Scan saved: {lidar_filename}")
 
                     summary = self.summarize_scan_file(lidar_filename)
+
+                    print("[DEBUG] LiDAR summary:")
+                    print(json.dumps(summary, indent=2))
 
                     self.memory.append({
                         "role": "tool",
@@ -598,52 +649,106 @@ class Autopilot:
 
         total_points = 0
 
+        # --------------------------------------------------
+        # TEMPORARY ROVER SELF-MASK
+        # Measurements are from the center of the LiDAR.
+        #
+        # +X = front
+        # -X = back
+        # +Y = left
+        # -Y = right
+        # --------------------------------------------------
+
+        FRONT_LIMIT = 0.1524   # 0.5 ft
+        REAR_LIMIT = 0.6096    # 2.0 ft
+        LEFT_LIMIT = 0.4572    # 1.5 ft
+        RIGHT_LIMIT = 0.4572   # 1.5 ft
+
+        # Floor appears about 0.30 m below the LiDAR.
+        # Ignore points at or below this height.
+        FLOOR_CUTOFF_Z = -0.27
+
+        # Clearance thresholds
+        BLOCKED_DISTANCE = 0.40
+        CLEAR_DISTANCE = 0.75
+
         with open(filename, "r") as f:
             lines = f.readlines()
 
         for line in lines:
+
             values = line.strip().split()
 
             if len(values) < 4:
                 continue
+
             try:
-                
                 x = float(values[0])
                 y = float(values[1])
                 z = float(values[2])
                 intensity = float(values[3])
+
             except ValueError:
                 continue
-            distance = math.sqrt(x**2 + y**2 + z**2)
+
+            # --------------------------------------------------
+            # Ignore points belonging to the rover itself
+            # --------------------------------------------------
+
+            if (
+                -REAR_LIMIT <= x <= FRONT_LIMIT
+                and
+                -RIGHT_LIMIT <= y <= LEFT_LIMIT
+            ):
+                continue
+
+            # Ignore floor-level LiDAR returns
+            if z <= FLOOR_CUTOFF_Z:
+                continue
+
+            distance = math.sqrt(
+                x**2 +
+                y**2 +
+                z**2
+            )
+
             if distance <= 0:
                 continue
 
             total_points += 1
 
-            # Angle around rover, assuming:
-            # +X = front
-            # +Y = left
-            # -Y = right
-            angle = math.degrees(math.atan2(y, x))
-            
-            # Convert angle to 0-360
+            # --------------------------------------------------
+            # Determine direction around rover
+            # --------------------------------------------------
+
+            angle = math.degrees(
+                math.atan2(y, x)
+            )
+
             if angle < 0:
                 angle += 360
 
             if angle >= 337.5 or angle < 22.5:
                 zones["front"].append(distance)
+
             elif 22.5 <= angle < 67.5:
                 zones["front_left"].append(distance)
+
             elif 67.5 <= angle < 112.5:
                 zones["left"].append(distance)
+
             elif 112.5 <= angle < 157.5:
                 zones["back_left"].append(distance)
+
             elif 157.5 <= angle < 202.5:
                 zones["back"].append(distance)
+
             elif 202.5 <= angle < 247.5:
                 zones["back_right"].append(distance)
+
             elif 247.5 <= angle < 292.5:
                 zones["right"].append(distance)
+
             elif 292.5 <= angle < 337.5:
                 zones["front_right"].append(distance)
 
@@ -652,78 +757,150 @@ class Autopilot:
                 "status": "empty_scan",
                 "scan_ok": False
             }
+
         zone_summary = {}
 
+        # --------------------------------------------------
+        # Summarize each direction
+        # --------------------------------------------------
+
         for zone_name, distances in zones.items():
+
             if distances:
-                
+
                 absolute_min = min(distances)
 
-                near_distance = float(np.percentile(distances, 5))
+                # Use 5th percentile instead of one random minimum point
+                near_distance = float(
+                    np.percentile(distances, 5)
+                )
 
-                avg_distance = sum(distances) / len(distances)
+                avg_distance = (
+                    sum(distances) /
+                    len(distances)
+                )
+
+                # BLOCKED / CAUTION / CLEAR
+                if near_distance <= BLOCKED_DISTANCE:
+                    clearance_status = "blocked"
+
+                elif near_distance <= CLEAR_DISTANCE:
+                    clearance_status = "caution"
+
+                else:
+                    clearance_status = "clear"
 
                 zone_summary[zone_name] = {
                     "points": len(distances),
-                    "absolute_min_m": round(absolute_min, 2),
-                    "near_distance_m": round(near_distance, 2),
-                    "avg_distance_m": round(avg_distance, 2),
-                    "clear": near_distance > 0.40
+                    "absolute_min_m": round(
+                        absolute_min,
+                        2
+                    ),
+                    "near_distance_m": round(
+                        near_distance,
+                        2
+                    ),
+                    "avg_distance_m": round(
+                        avg_distance,
+                        2
+                    ),
+                    "status": clearance_status,
+
+                    # Keep this for compatibility with older code
+                    "clear": clearance_status == "clear"
                 }
+
             else:
+
                 zone_summary[zone_name] = {
                     "points": 0,
                     "absolute_min_m": None,
                     "near_distance_m": None,
                     "avg_distance_m": None,
+                    "status": "unknown",
                     "clear": False
                 }
 
+        # --------------------------------------------------
+        # Direction groups
+        # --------------------------------------------------
+
         clear_zones = [
-            zone for zone, data in zone_summary.items()
-            if data["clear"]
+            zone
+            for zone, data in zone_summary.items()
+            if data["status"] == "clear"
+        ]
+
+        caution_zones = [
+            zone
+            for zone, data in zone_summary.items()
+            if data["status"] == "caution"
         ]
 
         blocked_zones = [
-            zone for zone, data in zone_summary.items()
-            if data["near_distance_m"] is not None and data["near_distance_m"] <= 0.40
+            zone
+            for zone, data in zone_summary.items()
+            if data["status"] == "blocked"
         ]
+
+        # --------------------------------------------------
+        # Best / closest directions
+        # --------------------------------------------------
 
         clearest_direction = max(
             zone_summary,
-            key=lambda z: zone_summary[z]["near_distance_m"] or 0
+            key=lambda zone:
+                zone_summary[zone]["near_distance_m"]
+                or 0
         )
 
-        closest_direction = min(
-            [
-                z for z in zone_summary if zone_summary[z]["near_distance_m"] is not None
-            ],
-            key=lambda z: zone_summary[z]["near_distance_m"]
-        )
+        valid_zones = [
+            zone
+            for zone in zone_summary
+            if zone_summary[zone]["near_distance_m"]
+            is not None
+        ]
+
+        if valid_zones:
+
+            closest_direction = min(
+                valid_zones,
+                key=lambda zone:
+                    zone_summary[zone]["near_distance_m"]
+            )
+
+            closest_distance = (
+                zone_summary[
+                    closest_direction
+                ]["near_distance_m"]
+            )
+
+        else:
+
+            closest_direction = None
+            closest_distance = None
+
         return {
             "status": "scan_saved",
             "scan_ok": True,
             "total_points": total_points,
             "file_path": filename,
+
             "zones": zone_summary,
+
             "clear_zones": clear_zones,
+            "caution_zones": caution_zones,
             "blocked_zones": blocked_zones,
+
             "clearest_direction": clearest_direction,
-            "closest_obstacle_direction": closest_direction,
-            "closest_obstacle_meters": zone_summary[closest_direction]["near_distance_m"]
+
+            "closest_obstacle_direction":
+                closest_direction,
+
+            "closest_obstacle_meters":
+                closest_distance
         }
 
-    def validate_action(self, toolcall, telemetry=None) -> bool:
-        """
-        Validate the proposed action for safety and feasibility.
-        Returns True if valid, False otherwise.
-        """
-
-        
-        name = toolcall.function.name                           # type: ignore
-        args = json.loads(toolcall.function.arguments or "{}")  # type: ignore
-        
-    
     def add_tool_result(self, tool_call_id, result):
         """
         Record the result of a tool that was executed outside Autopilot,
@@ -734,7 +911,6 @@ class Autopilot:
             "tool_call_id": tool_call_id,
             "content": json.dumps(result)
         })
-
 
     def update_memory(self, msg):
         

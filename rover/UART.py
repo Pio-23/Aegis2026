@@ -547,12 +547,28 @@ def execute_supervised_movement(serial_conn, command, args, get_current_telemetr
 
     global emergency_stop
 
-    start_time = time.time()
-
     # Temporary safety distances.
     # We can tune these after checking the ultrasonic sensors.
     FRONT_STOP_CM = 35.0
     REAR_STOP_CM = 35.0
+
+    # Different durations for straight movement and turning
+    MOVE_DURATION_S = 1.5
+    TURN_DURATION_S = 4.5
+
+    # Get movement information once
+    op = args.get("op")
+    spd = args.get("spd", 0.0)
+
+    # Select how long this movement should last
+    if op == "TURN":
+        duration_s = TURN_DURATION_S
+    else:
+        duration_s = MOVE_DURATION_S
+
+    print(f"[AI] Movement duration: {duration_s}s")
+
+    start_time = time.time()
 
     while (time.time() - start_time) < duration_s:
 
@@ -573,9 +589,6 @@ def execute_supervised_movement(serial_conn, command, args, get_current_telemetr
         center = ultrasonics.get("center_cm")
         right = ultrasonics.get("right_cm")
         rear = ultrasonics.get("rear_cm")
-
-        op = args.get("op")
-        spd = args.get("spd", 0.0)
 
         # ------------------------------------------
         # FORWARD SAFETY
@@ -719,8 +732,8 @@ def give_controls_to_autopilot(serial_conn: Serial, trip_json: str, dump_folder:
 
                     elif op == "TURN":
                         
-                        if 0 < abs(spd) < 0.70:
-                            spd = 0.70
+                        if 0 < abs(spd) < 1.0:
+                            spd = 1.0
                             args["spd"] = spd
 
                         command = generate_command(

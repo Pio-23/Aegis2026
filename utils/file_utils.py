@@ -145,21 +145,32 @@ def update_telemetry_JSON(filepath = 'badwords', filename = 'badwords', **kwargs
     if not os.path.isfile(path=filename):
         filename = make_telemetry_JSON(filepath)
 
-    with open(filename) as tel_f:
-        telemetry = json.load(tel_f)
-    
-    for key, value in kwargs.items():
-        if key == "video":
-            telemetry["videos"].append(value)
-        if key == "scan":
-            telemetry["scans"].append(value)
-        if key == "telemetry":
-            telemetry["telemetry"].append(value)
-            telemetry["duration_s"] += 1
+    # Use the SAME lock as get_latest_telemetry()
+    with FileLock(f"{filename}.lock"):
 
-    # Export the dict to the json file
-    with open(filename, 'w') as f:
-        json.dump(telemetry, f, indent=4)
+        # Read the existing JSON while holding the lock
+        with open(filename, 'r') as tel_f:
+            telemetry = json.load(tel_f)
+
+        for key, value in kwargs.items():
+
+            if key == "video":
+                telemetry["videos"].append(value)
+
+            if key == "scan":
+                telemetry["scans"].append(value)
+
+            if key == "telemetry":
+                telemetry["telemetry"].append(value)
+                telemetry["duration_s"] += 1
+
+        # Write while STILL holding the lock
+        with open(filename, 'w') as f:
+            json.dump(
+                telemetry,
+                f,
+                indent=4
+            )
 
     return filename
 
