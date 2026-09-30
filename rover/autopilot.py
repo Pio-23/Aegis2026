@@ -174,6 +174,31 @@ class Autopilot:
 
     RE-SCANNING RULES
 
+    LIDAR REUSE RULES
+
+    - A LiDAR scan does NOT become stale simply because the rover moved once.
+    - LiDAR scans are expensive and slow. Reuse the most recent completed scan
+    for several small movement segments when the environment remains consistent.
+    - Do not request a new LiDAR scan after every MOVE.
+
+    Continue using the previous LiDAR scan when:
+    - the rover has only made 1 or 2 short MOVE segments since the scan,
+    - the rover has not significantly changed heading,
+    - ultrasonic readings remain safely clear,
+    - the camera still shows the same open path,
+    - and no new obstacle or uncertainty has appeared.
+
+    Request a new LiDAR scan when:
+    - no completed LiDAR scan exists yet,
+    - approximately 3 or more movement segments have occurred since the last scan,
+    - the rover has significantly changed heading,
+    - an ultrasonic sensor reports a nearby obstacle,
+    - camera and LiDAR information conflict,
+    - the rover reaches a doorway, intersection, obstacle, or substantially new area,
+    - or the current geometry is genuinely uncertain.
+
+    Do NOT describe a LiDAR scan as "stale" merely because one short movement occurred.
+
     Do not continuously repeat LiDAR scans without a reason.
 
     If one scan reports no safe path:
@@ -184,6 +209,17 @@ class Autopilot:
 
     Do not enter an endless scan loop.
 
+    TARGET-DIRECTION CLEARANCE
+
+    - Judge clearance primarily in the direction the rover intends to move.
+    - A caution reading in a side sector alone is not sufficient reason to
+    request another LiDAR scan when moving forward, provided the forward
+    path remains clear, the camera confirms usable clearance, and ultrasonic
+    readings do not indicate an immediate collision risk.
+    - If the intended travel direction itself becomes caution or blocked,
+    becomes visually uncertain, or conflicts with the previous LiDAR scan,
+    obtain a new LiDAR scan before continuing.
+    
     COMMUNICATION STYLE
 
     Briefly state:
@@ -303,9 +339,33 @@ class Autopilot:
 
     def __init__(self) -> None:
 
-        self.memory_depth = 21  # Number of past interactions to remember
+        self.memory_depth = 30  # Number of past interactions to remember
         self.memory = [self.context_msg]
-        self.model_name = "gpt-5-nano"  # LLM model to use
+        self.model_name = "gpt-5.6-luna"  # LLM model to use
+
+        # Persistent navigation/exploration state
+        self.navigation_state = {
+            "last_lidar_time": None,
+
+            "last_lidar": {
+                "clear_zones": [],
+                "caution_zones": [],
+                "blocked_zones": [],
+                "clearest_direction": None,
+                "closest_obstacle_direction": None,
+                "closest_obstacle_meters": None
+            },
+
+            "current_yaw_deg": None,
+            "previous_yaw_deg": None,
+            "yaw_at_last_lidar_deg": None,
+            "heading_change_since_lidar_deg": 0.0,
+
+            "recent_movements": [],
+            "movement_segments_since_lidar": 0,
+
+            "exploration_heading": None
+        }
 
         # Connect API account to client
         self.client = openai.OpenAI(
@@ -315,6 +375,70 @@ class Autopilot:
     def encode_image(self, filename):
         with open(filename, "rb") as image_file:
             return base64.b64encode(image_file.read()).decode("utf-8")
+
+    def add_camera_observation(self, filename):
+        """
+        Add a fresh camera image to navigation memory after movement.
+        """
+
+        image_base64 = self.encode_image(filename)
+
+        self.update_memory({
+            "role": "user",
+            "content": [
+                {
+                    "type": "text",
+                    "text": (
+                        "This is a fresh camera image captured immediately "
+                        "after the rover's most recent movement. "
+                        "Use this image together with the latest LiDAR summary, "
+                        "fresh ultrasonic readings, IMU heading, navigation state, "
+                        "and recent movement history. "
+                        "A previous LiDAR scan does not automatically become stale "
+                        "after a short movement. If the visual scene remains "
+                        "consistent and the target path is still safe, continue "
+                        "exploring without requesting another LiDAR scan."
+                    )
+                },
+                {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": "data:image/jpeg;base64," + image_base64,
+                        "detail": "low"
+                    }
+                }
+            ]
+        })
+    
+    def update_navigation_state_from_telemetry(self, telemetry):
+
+        if not isinstance(telemetry, dict):
+            return
+
+        imu = telemetry.get("imu", {})
+        yaw = imu.get("yaw_deg")
+
+        if not isinstance(yaw, (int, float)):
+            return
+
+        previous_yaw = self.navigation_state["current_yaw_deg"]
+
+        self.navigation_state["previous_yaw_deg"] = previous_yaw
+        self.navigation_state["current_yaw_deg"] = yaw
+
+        yaw_at_scan = self.navigation_state["yaw_at_last_lidar_deg"]
+
+        if yaw_at_scan is not None:
+
+            # Shortest signed angle between current heading
+            # and heading at the last LiDAR scan.
+            heading_change = (
+                (yaw - yaw_at_scan + 180) % 360
+            ) - 180
+
+            self.navigation_state[
+                "heading_change_since_lidar_deg"
+            ] = round(heading_change, 1)
 
     def summarize_telemetry(self, telemetry):
         """
@@ -355,17 +479,35 @@ class Autopilot:
         then ask GPT again.
         """
 
+        self.update_navigation_state_from_telemetry(telemetry)
+
         sensor_summary = self.summarize_telemetry(telemetry)
+
+        navigation_state_for_ai = dict(self.navigation_state)
+
+        last_lidar_time = navigation_state_for_ai.pop(
+            "last_lidar_time",
+            None
+        )
+
+        if last_lidar_time is None:
+            navigation_state_for_ai["last_lidar_age_s"] = None
+        else:
+            navigation_state_for_ai["last_lidar_age_s"] = round(
+                time.time() - last_lidar_time,
+                1
+            )
         
         self .update_memory({
             "role": "user",
             "content": json.dumps({
                 "telemetry": telemetry,
                 "sensor_summary": sensor_summary,
+                "navigation_state": navigation_state_for_ai,
             })
         })
 
-        MAX_TOOL_STEPS =5
+        MAX_TOOL_STEPS =10
 
         for step in range(MAX_TOOL_STEPS):
 
@@ -374,7 +516,8 @@ class Autopilot:
                 messages=self.memory,
                 tools=Autopilot.aegis_tools,
                 tool_choice="required",
-                parallel_tool_calls=False
+                parallel_tool_calls=False,
+                reasoning_effort="none"
             )
 
             message = response.choices[0].message
@@ -408,8 +551,30 @@ class Autopilot:
 
                     summary = self.summarize_scan_file(lidar_filename)
 
-                    print("[DEBUG] LiDAR summary:")
-                    print(json.dumps(summary, indent=2))
+                    self.navigation_state["last_lidar_time"] = time.time()
+
+                    self.navigation_state["last_lidar"] = {
+                        "clear_zones": summary.get("clear_zones", []),
+                        "caution_zones": summary.get("caution_zones", []),
+                        "blocked_zones": summary.get("blocked_zones", []),
+                        "clearest_direction": summary.get("clearest_direction"),
+                        "closest_obstacle_direction": summary.get(
+                            "closest_obstacle_direction"
+                        ),
+                        "closest_obstacle_meters": summary.get(
+                            "closest_obstacle_meters"
+                        )
+                    }
+
+                    self.navigation_state["movement_segments_since_lidar"] = 0
+
+                    self.navigation_state["yaw_at_last_lidar_deg"] = (
+                        self.navigation_state["current_yaw_deg"]
+                    )
+
+                    self.navigation_state[
+                        "heading_change_since_lidar_deg"
+                    ] = 0.0
 
                     self.memory.append({
                         "role": "tool",
@@ -459,7 +624,7 @@ class Autopilot:
                                         "type": "image_url",
                                         "image_url": {
                                             "url": "data:image/jpeg;base64," + image_base64,
-                                            "detail": "low"
+                                            "detail": "high"
                                         }
                                     }
                                 ]
@@ -902,10 +1067,42 @@ class Autopilot:
         }
 
     def add_tool_result(self, tool_call_id, result):
-        """
-        Record the result of a tool that was executed outside Autopilot,
-        such as move_rover in UART.py.
-        """
+
+        # ------------------------------------------
+        # RECORD COMPLETED MOVEMENT
+        # ------------------------------------------
+
+        if (
+            isinstance(result, dict)
+            and result.get("status") == "completed"
+            and isinstance(result.get("command"), dict)
+        ):
+            command = result["command"]
+
+            movement_record = {
+                "op": command.get("op"),
+                "spd": command.get("spd"),
+                "turn_dir": command.get("turn_dir"),
+                "duration_s": result.get("movement_duration_s")
+            }
+
+            self.navigation_state["recent_movements"].append(
+                movement_record
+            )
+
+            # Only keep the most recent 8 movements
+            self.navigation_state["recent_movements"] = (
+                self.navigation_state["recent_movements"][-8:]
+            )
+
+            self.navigation_state[
+                "movement_segments_since_lidar"
+            ] += 1
+
+        # ------------------------------------------
+        # SEND TOOL RESULT TO GPT MEMORY
+        # ------------------------------------------
+
         self.update_memory({
             "role": "tool",
             "tool_call_id": tool_call_id,

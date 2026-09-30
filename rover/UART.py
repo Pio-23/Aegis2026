@@ -786,6 +786,42 @@ def give_controls_to_autopilot(serial_conn: Serial, trip_json: str, dump_folder:
                             }
                         )
 
+                        # ------------------------------------------
+                        # FRESH CAMERA IMAGE AFTER MOVEMENT
+                        # ------------------------------------------
+
+                        if ugv_cam is not None and ugv_cam.connected:
+
+                            print("[AI] Capturing fresh camera image after movement.")
+
+                            # Give motor current / electrical noise a moment to settle
+                            time.sleep(0.75)
+
+                            camera_filename = ugv_cam.capture_image(
+                                filepath=dump_folder
+                            )
+
+                            if camera_filename is not None:
+
+                                print(
+                                    f"[AI] Post-movement camera image saved: "
+                                    f"{camera_filename}"
+                                )
+
+                                spartan.add_camera_observation(
+                                    camera_filename
+                                )
+
+                                print(
+                                    "[AI] Fresh post-movement camera image "
+                                    "added to navigation memory."
+                                )
+
+                            else:
+                                print(
+                                    "[AI] Post-movement camera capture failed."
+                                )
+
                     else:
                         spartan.add_tool_result(
                             action.id,

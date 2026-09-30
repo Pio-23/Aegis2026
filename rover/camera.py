@@ -33,6 +33,21 @@ class Camera(Picamera2):
             self.configure(self.create_video_configuration(
                 main={"size": (1280, 720), "format": "YUV420"}
             ))
+
+            # Start camera once and keep it running.
+            # AEGIS can then grab fresh frames without
+            # restarting the camera every time.
+            self.start()
+
+            # Give the camera time to initialize/expose correctly.
+            sleep(1.0)
+
+            self.connected = True
+
+            print(
+                "[INI] camera.py: Camera stream started."
+            )
+
         except Exception as e:
             set_pixel(CAM_ADDR, PX_WHITE)
             print(f"[ERR] camera.py: Camera initialization failed: {e}")
@@ -93,12 +108,8 @@ class Camera(Picamera2):
         )
 
         try:
-            self.start()
-            sleep(0.5)
 
             self.capture_file(filename)
-
-            self.stop()
 
             print(f"[RUN] camera.py: Image saved to {filename}")
             return filename
