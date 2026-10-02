@@ -34,19 +34,6 @@ class Camera(Picamera2):
                 main={"size": (1280, 720), "format": "YUV420"}
             ))
 
-            # Start camera once and keep it running.
-            # AEGIS can then grab fresh frames without
-            # restarting the camera every time.
-            self.start()
-
-            # Give the camera time to initialize/expose correctly.
-            sleep(1.0)
-
-            self.connected = True
-
-            print(
-                "[INI] camera.py: Camera stream started."
-            )
 
         except Exception as e:
             set_pixel(CAM_ADDR, PX_WHITE)
@@ -107,8 +94,14 @@ class Camera(Picamera2):
             ext=".jpg"
         )
 
-        try:
+        started = False
 
+        try:
+            # Start camera only when a picture is actually needed
+            self.start()
+            started = True
+
+            sleep(0.5)  # Allow camera to warm up
             self.capture_file(filename)
 
             print(f"[RUN] camera.py: Image saved to {filename}")

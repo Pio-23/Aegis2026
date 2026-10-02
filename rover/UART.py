@@ -21,8 +21,14 @@ from lidar import scan
 INPUT_BUFFER_SECONDS = 0.1
 STICK_MOVE_THRESHOLD = 0.05         # Fixes stick drift
 
-LLM_DRIVE_ENABLED = True # If True, disables manual control for LLM autopilot
+LLM_DRIVE_ENABLED = True     # If True, disables manual control for LLM autopilot
 HUMAN_APPROVAL = False #temporal for the rover to take aproval from user before executing any action
+
+LEFT_TURN_SPEED = 0.96
+RIGHT_TURN_SPEED = 0.90
+
+LEFT_SECONDS_PER_15_DEG = 0.50
+RIGHT_SECONDS_PER_15_DEG = 3.5 / 6.0   # ~= 0.5833
 
 emergency_stop = False
 
@@ -552,19 +558,12 @@ def execute_supervised_movement(serial_conn, command, args, get_current_telemetr
     FRONT_STOP_CM = 35.0
     REAR_STOP_CM = 35.0
 
-    # Different durations for straight movement and turning
-    MOVE_DURATION_S = 1.5
-    TURN_DURATION_S = 4.5
-
     # Get movement information once
     op = args.get("op")
     spd = args.get("spd", 0.0)
 
-    # Select how long this movement should last
-    if op == "TURN":
-        duration_s = TURN_DURATION_S
-    else:
-        duration_s = MOVE_DURATION_S
+    # duration_s is calculated by the caller.
+    print(f"[AI] Movement duration: {duration_s:.3f}s")
 
     print(f"[AI] Movement duration: {duration_s}s")
 
@@ -724,6 +723,8 @@ def give_controls_to_autopilot(serial_conn: Serial, trip_json: str, dump_folder:
                 try:
 
                     if op == "MOVE":
+                        
+                        duration_s = 1.5
 
                         command = generate_command(
                             op="MOVE",
@@ -731,10 +732,32 @@ def give_controls_to_autopilot(serial_conn: Serial, trip_json: str, dump_folder:
                         )
 
                     elif op == "TURN":
-                        
-                        if 0 < abs(spd) < 1.0:
-                            spd = 1.0
-                            args["spd"] = spd
+                        turn_dir = args.get("turn_dir", "LEFT")
+                        turn_degrees = args.get("turn_degrees", 15)
+
+                        # Only allow calibrated 15-degree increments.
+                        allowed_turns = [15, 30, 45, 60, 75, 90]
+
+                        if turn_degrees not in allowed_turns:
+                            turn_degrees = min(
+                                allowed_turns,
+                                key=lambda x: abs(x - turn_degrees)
+                            )
+
+                        if turn_dir == "LEFT":
+                            spd = LEFT_TURN_SPEED
+                            duration_s = (
+                                turn_degrees / 15.0
+                            ) * LEFT_SECONDS_PER_15_DEG
+
+                        else:
+                            spd = RIGHT_TURN_SPEED
+                            duration_s = (
+                                turn_degrees / 15.0
+                            ) * RIGHT_SECONDS_PER_15_DEG
+
+                        args["spd"] = spd
+                        args["turn_degrees"] = turn_degrees
 
                         command = generate_command(
                             op="TURN",
@@ -742,20 +765,13 @@ def give_controls_to_autopilot(serial_conn: Serial, trip_json: str, dump_folder:
                             turn_dir=turn_dir
                         )
 
-                    else:
                         print(
-                            f"[ERR] Unknown AI movement operation: {op}"
+                            f"[AI] TURN {turn_dir}: "
+                            f"{turn_degrees} deg | "
+                            f"speed={spd:.2f} | "
+                            f"time={duration_s:.2f}s"
                         )
-
-                        spartan.add_tool_result(
-                            action.id,
-                            {
-                                "status": "failed",
-                                "reason": f"Unknown operation: {op}"
-                            }
-                        )
-
-                        continue
+                        
 
                     if command is not None:
                         #this stuff too is for the constant movement if it doesnt work remove it and change other stuff
@@ -774,7 +790,7 @@ def give_controls_to_autopilot(serial_conn: Serial, trip_json: str, dump_folder:
                             command=command,
                             args=args,
                             get_current_telemetry=get_current_telemetry,
-                            duration_s=1.5
+                            duration_s=duration_s
                         )
 
                         spartan.add_tool_result(
@@ -782,7 +798,7 @@ def give_controls_to_autopilot(serial_conn: Serial, trip_json: str, dump_folder:
                             {
                                 "status": "completed",
                                 "command": args,
-                                "movement_duration_s": 1.5
+                                "movement_duration_s": duration_s
                             }
                         )
 

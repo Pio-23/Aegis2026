@@ -142,13 +142,12 @@ class Autopilot:
     TURN EXECUTION BEHAVIOR
 
     - TURN rotates the rover in place; it does not move sideways.
-    - LEFT and RIGHT turns are stationary skid-steer rotations.
-    - A normal TURN segment currently lasts about 4.5 seconds at full turn power.
-    - Based on physical testing, 1.5 seconds produced roughly a 10-degree turn,
-    so a 4.5-second turn is expected to produce roughly a 30-degree heading change.
-    - This angle is approximate and can vary with traction and battery level.
+    - LEFT and RIGHT are stationary skid-steer rotations.
+    - A normal TURN segment currently lasts about 2.5 seconds at full turn power.
+    - Based on physical testing, one TURN segment rotates the rover roughly 20 degrees.
+    - The actual angle can vary because of wheel slip, traction, and battery level.
     - If a larger heading change is needed, issue another TURN after reassessing.
-    - After facing an open direction, use MOVE to travel forward.
+    - After facing the desired open direction, use MOVE to travel forward.
 
     EXPLORATION OBJECTIVE
 
@@ -297,14 +296,24 @@ class Autopilot:
                                     "Required for MOVE and TURN. "
                                     "Positive only for TURN."
                                  )
-},
+                            },
                         "turn_dir": {
                             "type": "string",
                             "enum": ["LEFT", "RIGHT"],
                             "description": (
                                 "Turn direction. Only used when op is TURN."
                             )
-                        }
+                        },
+                        "turn_degrees": {
+                            "type": "integer",
+                            "enum": [15, 30, 45, 60, 75, 90],
+                            "description": (
+                                "For TURN commands, the requested in-place rotation angle in degrees. "
+                                "Choose from 15, 30, 45, 60, 75, or 90 degrees. "
+                                "Use small turns for heading corrections and larger turns only when "
+                                "a major direction change is needed."
+                            )
+                        },
                     },
                     "required": ["op", "spd"]
                 }
