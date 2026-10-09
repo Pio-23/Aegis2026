@@ -724,11 +724,19 @@ def give_controls_to_autopilot(serial_conn: Serial, trip_json: str, dump_folder:
 
                     if op == "MOVE":
                         
-                        duration_s = 1.5
+                        duration_s = float(args.get("move_duration_s", 1.5))
+
+                        args["move_duration_s"] = duration_s
 
                         command = generate_command(
                             op="MOVE",
                             spd=spd
+                        )
+
+                        print(
+                            f"[AI] MOVE | "
+                            f"speed={spd:.2f} | "
+                            f"time={duration_s:.2f}s"
                         )
 
                     elif op == "TURN":
