@@ -12,7 +12,7 @@ from lidar import motor
 from utils import file_utils    # get_timestamped_filename()
 from utils import math_utils    # sph_to_cart_array()
 from utils.led_utils import *   # set_pixel
-
+from rover.lidar_visualizer import create_lidar_visualizations  #for visualization of point cloud scans
 
 class Scanner():
     """
@@ -51,6 +51,8 @@ class Scanner():
         self.is_trimming = False
         self.is_converting = False
         self.is_saving = False
+
+        self.last_visualizations = {}
 
         set_pixel(LQ1_ADDR, PX_WHITE)
         set_pixel(LQ2_ADDR, PX_WHITE)
@@ -240,6 +242,7 @@ class Scanner():
              nonfat_pct=0.2,
              convert=True,
              save=True,
+             visualize=True,
              filepath='.') -> str | None:
         """
         Captures, trims, converts, and saves a cloud. Arguments are optional.
@@ -266,6 +269,24 @@ class Scanner():
         if convert:
             cloud = self.convert_cloud(cloud)
             set_pixel(LQ2_ADDR, PX_GREEN)
+            if visualize:
+                print(
+                    "[RUN] scan.py: Generating LiDAR visualizations..."
+                )
+
+                self.last_visualizations = create_lidar_visualizations(
+                    points=cloud,
+                    output_dir=filepath
+                )
+
+                print(
+                    "[RUN] scan.py: LiDAR visualizations completed."
+                )
+
+                for view_name, view_file in lidar_views.items():
+                    print(
+                        f"[RUN] scan.py: {view_name}: {view_file}"
+                    )
         if save:
             filename: str = self.save_cloud(cloud=cloud, filepath=filepath)
             set_pixel(LQ3_ADDR, PX_GREEN)

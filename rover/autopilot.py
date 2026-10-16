@@ -15,6 +15,7 @@ import time
 import base64
 
 from lidar import scan
+from rover.navigation_map import NavigationMap
 
 
 class Autopilot:
@@ -231,6 +232,42 @@ class Autopilot:
 
     If there is no safe movement, remain stationary.
 
+    CLEAR-PATH CONTINUATION
+
+    In a clearly open corridor or clearly open forward path, continuous
+    forward progress is preferred over repeated short movement segments.
+
+    When the camera, LiDAR context, and ultrasonic readings agree that the
+    forward path is clear:
+
+    - choose a LONG move_duration_s,
+    - continue forward rather than stopping every few seconds,
+    - allow the ultrasonic safety system to stop the movement early if the
+      rover actually approaches an obstacle,
+    - and do not request another LiDAR scan merely because a MOVE finished.
+
+    A MOVE ending because its requested duration elapsed does NOT mean that
+    the environment changed.
+
+    If a MOVE finishes normally and:
+
+    - the fresh camera still shows the same open corridor,
+    - front ultrasonic remains safely clear,
+    - the rover is still following the same path,
+    - and no new obstacle or intersection requires geometric understanding,
+
+    then the preferred next action is another MOVE, not LiDAR.
+
+    In a long open corridor, choose a duration long enough to make meaningful
+    continuous progress. Do not intentionally divide a clearly safe corridor
+    into repeated 1-3 second movement segments.
+
+    Use short movements primarily when approaching:
+    - an obstacle,
+    - the end of a corridor,
+    - a tight corner,
+    - a doorway that requires careful alignment,
+    - or uncertain geometry.
 
     ============================================================
     ROVER MOTION MODEL
@@ -803,7 +840,7 @@ class Autopilot:
 
     def __init__(self) -> None:
 
-        self.memory_depth = 30  # Number of past interactions to remember
+        self.memory_depth = 50  # Number of past interactions to remember
         self.memory = [self.context_msg]
         self.model_name = "gpt-5.6-luna"  # LLM model to use
 
@@ -831,6 +868,9 @@ class Autopilot:
             "exploration_heading": None
         }
 
+        self.navigation_map = NavigationMap()
+        self.navigation_map_file = None
+
         # Connect API account to client
         self.client = openai.OpenAI(
         api_key=os.getenv("OPENAI_API_KEY")
@@ -839,6 +879,133 @@ class Autopilot:
     def encode_image(self, filename):
         with open(filename, "rb") as image_file:
             return base64.b64encode(image_file.read()).decode("utf-8")
+
+    def add_lidar_visualizations(self, lidar_views):
+        """
+        Send the visual representations of the latest LiDAR scan to Luna.
+
+        All images represent the SAME point cloud:
+            XY  = top-down
+            XZ  = side
+            YZ  = front/elevation
+            XYZ = 3D perspective
+        """
+
+        if not isinstance(lidar_views, dict) or not lidar_views:
+            print("[AI] No LiDAR visualizations available.")
+            return
+
+        content = [
+            {
+                "type": "text",
+                "text": (
+                    "These images are four visualizations of the SAME latest "
+                    "AEGIS LiDAR point cloud. Use them together with the numerical "
+                    "LiDAR summary already provided.\n\n"
+
+                    "Coordinate system:\n"
+                    "+X = FRONT of rover\n"
+                    "+Y = LEFT of rover\n"
+                    "+Z = UP\n"
+                    "The rover is located at the origin.\n\n"
+
+                    "Views:\n"
+                    "XY_TOP = top-down view of the environment.\n"
+                    "XZ_SIDE = vertical side view along the forward/back direction.\n"
+                    "YZ_FRONT = vertical view showing left/right and height.\n"
+                    "XYZ_3D = 3D perspective of the point cloud.\n\n"
+
+                    "Use the numerical LiDAR summary for exact clearance and "
+                    "collision distances. Use these images primarily to understand "
+                    "the SHAPE and STRUCTURE of the environment.\n\n"
+
+                    "Interpret features such as:\n"
+                    "- room or corridor shape\n"
+                    "- walls\n"
+                    "- corners\n"
+                    "- openings and possible doorways\n"
+                    "- side passages\n"
+                    "- large obstacles\n"
+                    "- likely navigable paths\n"
+                    "- whether the environment continues left, right, or forward\n\n"
+
+                    "Remember this spatial interpretation during later movements "
+                    "and turns. A movement or rotation does NOT automatically "
+                    "require another LiDAR scan. Use recent turn history, camera, "
+                    "ultrasonics, and IMU heading to relate this scan to the rover's "
+                    "new orientation.\n\n"
+
+                    "Do not interpret plot axes, labels, grid lines, or the rover "
+                    "marker itself as physical obstacles."
+                )
+            }
+        ]
+
+        view_labels = {
+            "xy_top": "XY_TOP - TOP-DOWN VIEW",
+            "xz_side": "XZ_SIDE - SIDE VIEW",
+            "yz_front": "YZ_FRONT - FRONT/ELEVATION VIEW",
+            "xyz_3d": "XYZ_3D - 3D PERSPECTIVE VIEW",
+        }
+
+        view_order = [
+            "xy_top",
+            "xz_side",
+            "yz_front",
+            "xyz_3d",
+        ]
+
+        images_added = 0
+
+        for view_name in view_order:
+
+            filename = lidar_views.get(view_name)
+
+            if not filename:
+                print(
+                    f"[AI] LiDAR view missing: {view_name}"
+                )
+                continue
+
+            if not os.path.exists(filename):
+                print(
+                    f"[AI] LiDAR visualization file not found: {filename}"
+                )
+                continue
+
+            image_base64 = self.encode_image(filename)
+
+            # Label each image so Luna knows exactly which projection it is seeing.
+            content.append({
+                "type": "text",
+                "text": view_labels[view_name]
+            })
+
+            content.append({
+                "type": "image_url",
+                "image_url": {
+                    "url": "data:image/png;base64," + image_base64,
+                    "detail": "high"
+                }
+            })
+
+            images_added += 1
+
+        if images_added == 0:
+            print(
+                "[AI] No LiDAR visualization images could be loaded."
+            )
+            return
+
+        self.update_memory({
+            "role": "user",
+            "content": content
+        })
+
+        print(
+            f"[AI] Sent {images_added} LiDAR visualization images to Luna."
+        )
+
 
     def add_camera_observation(self, filename):
         """
@@ -943,9 +1110,18 @@ class Autopilot:
         then ask GPT again.
         """
 
+        self.navigation_map_file = os.path.join(
+            dump_folder,
+            "navigation_map_latest.png"
+        )
+
         self.update_navigation_state_from_telemetry(telemetry)
 
         sensor_summary = self.summarize_telemetry(telemetry)
+
+        print("\n[LIDAR DEBUG] Environment summary:")
+        print(json.dumps(summary, indent=2))
+        print()
 
         navigation_state_for_ai = dict(self.navigation_state)
 
@@ -968,6 +1144,7 @@ class Autopilot:
                 "telemetry": telemetry,
                 "sensor_summary": sensor_summary,
                 "navigation_state": navigation_state_for_ai,
+                "navigation_map": self.navigation_map.get_ai_context()
             })
         })
 
@@ -1010,12 +1187,18 @@ class Autopilot:
                 if name == "scan_environment":
                     print("Starting LiDAR scan...")
 
-                    lidar_filename = scanner.scan(filepath=dump_folder)
+                    lidar_filename = scanner.scan(filepath=dump_folder, visualize=True)
                     print(f"Scan saved: {lidar_filename}")
 
+                    lidar_views = scanner.last_visualizations
+
+                    print("[AI] LiDAR visualization files:")
+                    for view_name, view_file in lidar_views.items():
+                        print(f"    {view_name}: {view_file}")
+                        
                     summary = self.summarize_scan_file(lidar_filename)
 
-                    self.navigation_state["last_lidar_time"] = time.time()
+                    self.navigation_state["last_lidar_time"] = time.time()  
 
                     self.navigation_state["last_lidar"] = {
                         "clear_zones": summary.get("clear_zones", []),
@@ -1046,10 +1229,27 @@ class Autopilot:
                         "content": json.dumps({
                             "status": "scan_saved",
                             "file_path": lidar_filename,
-                            "summary": summary
+                            "summary": summary,
+                            "navigation_map": self.navigation_map.get_ai_context()
                         })
                     })
 
+                    self.add_lidar_visualizations(
+                        lidar_views
+                    )
+
+                    self.navigation_map.add_lidar_scan(
+                        filename=lidar_filename,
+                        summary=summary,
+                        visualization_files=lidar_views
+                    )
+
+                    if self.navigation_map_file:
+
+                        self.navigation_map.render_map_png(
+                            self.navigation_map_file
+                        )
+                        
                     print(
                         f"[AI] GPT requested LiDAR scan. Scan complete and summarized."
                         f"for {call.id}" 
@@ -1547,16 +1747,37 @@ class Autopilot:
                 "op": command.get("op"),
                 "spd": command.get("spd"),
                 "turn_dir": command.get("turn_dir"),
+                "turn_degrees": command.get("turn_degrees"),
                 "duration_s": result.get("movement_duration_s")
             }
 
+            op = command.get("op")
+
+            if op == "MOVE":
+                self.navigation_map.apply_move(
+                    duration_s=result.get("movement_duration_s"),
+                    spd=command.get("spd", 0.0)
+                )
+
+            elif op == "TURN":
+                self.navigation_map.apply_turn(
+                    turn_dir=command.get("turn_dir"),
+                    turn_degrees=command.get("turn_degrees")
+                )
+
+            if self.navigation_map_file:
+
+                self.navigation_map.render_map_png(
+                    self.navigation_map_file
+                )
+                
             self.navigation_state["recent_movements"].append(
                 movement_record
             )
 
             # Only keep the most recent 8 movements
             self.navigation_state["recent_movements"] = (
-                self.navigation_state["recent_movements"][-8:]
+                self.navigation_state["recent_movements"][-20:]
             )
 
             self.navigation_state[
