@@ -565,8 +565,6 @@ def execute_supervised_movement(serial_conn, command, args, get_current_telemetr
     # duration_s is calculated by the caller.
     print(f"[AI] Movement duration: {duration_s:.3f}s")
 
-    print(f"[AI] Movement duration: {duration_s}s")
-
     start_time = time.time()
 
     while (time.time() - start_time) < duration_s:

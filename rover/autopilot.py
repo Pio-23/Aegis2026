@@ -2,19 +2,13 @@
 
 # AEGIS Senior Design, Created 10/22/2025
 
-from email.mime import message
-from fileinput import filename
 import os
-from urllib import response
-
-from matplotlib import lines
-import openai
-
 import json
 import time
 import base64
 
-from lidar import scan
+import openai
+
 from rover.navigation_map import NavigationMap
 
 
@@ -73,11 +67,9 @@ class Autopilot:
 
     Navigation decisions may include:
 
-    - LiDAR distance measurements
-    - LiDAR XY top-down image
-    - LiDAR XZ side image
-    - LiDAR YZ front image
-    - LiDAR XYZ 3D image
+    - LiDAR directional distance estimates
+    - LiDAR NAVIGATION_XY top-down image
+    - LiDAR CORRIDOR_XZ center travel-corridor image
     - fresh camera images
     - ultrasonic readings
     - IMU / heading information
@@ -96,7 +88,8 @@ class Autopilot:
     LIDAR MEASUREMENT SUMMARY
     ============================================================
 
-    The LiDAR navigation summary contains measurements for eight sectors:
+    The LiDAR summary currently provides one supporting distance estimate
+    for each of eight broad directional sectors:
 
     - front
     - front_left
@@ -107,78 +100,44 @@ class Autopilot:
     - right
     - front_right
 
-    The summary provides measurements such as:
+    Each sector contains:
 
-    minimum_distance_m
-    near_distance_m
-    average_distance_m
-
-    These are MEASUREMENTS ONLY.
-
-    Python has NOT classified these sectors as:
-
-    - blocked
-    - caution
-    - clear
-    - best
-    - safest
-
-    You must interpret the measurements together with the LiDAR images,
-    camera, map, ultrasonic sensors, and recent navigation history.
-
-
-    minimum_distance_m:
-
-    The nearest retained LiDAR point in the sector.
-
-    This may correspond to:
-
-    - a chair leg
-    - table leg
-    - wall edge
-    - narrow object
-    - furniture near the side of the path
-    - sensor noise
-    - another isolated object
-
-    A small minimum_distance_m does NOT automatically mean that the entire
-    sector or travel path is blocked.
-
-
-    near_distance_m:
-
-    A more stable measurement of nearby geometry based on multiple LiDAR
-    returns.
-
-    Use it as useful geometric evidence, but NOT as an automatic
-    blocked/clear decision.
-
-    A 45-degree sector can contain a close object near one edge while still
-    containing a usable passage through another part of that sector.
-
-
-    average_distance_m:
-
-    Represents the general depth or openness of the sector.
-
-    Do not use average distance alone for collision avoidance.
-
+    obstacle_distance_m
 
     IMPORTANT:
 
-    Do not convert one small sector distance directly into:
+    obstacle_distance_m is a supporting LiDAR estimate only.
 
-    "this direction is blocked."
+    It is calculated from geometry inside a broad directional sector and
+    does NOT necessarily represent the distance that the rover can travel
+    through the center of that direction.
 
-    Instead determine whether the ROVER'S ACTUAL TRAVEL CORRIDOR has enough
-    space.
+    A nearby chair leg, table leg, wall edge, or other object near one side
+    of a sector may make obstacle_distance_m appear much shorter than the
+    actual open travel corridor.
 
-    For example:
+    Therefore:
 
-    A FRONT sector may contain chair legs near its left and right edges
-    while the center of the aisle remains open.
+    - Do NOT treat obstacle_distance_m as an automatic blocked/clear result.
+    - Do NOT simply choose the direction with the largest number.
+    - Do NOT assume the number represents exact center-corridor clearance.
 
-    In that situation, forward movement may still be correct.
+    Use the NAVIGATION_XY image as the primary LiDAR representation for
+    horizontal path geometry.
+
+    Use CORRIDOR_XZ to inspect geometry inside the rover's center travel
+    corridor.
+
+    Combine these with:
+
+    - camera imagery
+    - ultrasonic readings
+    - persistent navigation map
+    - current heading
+    - recent movement history
+
+    The directional distance summary is currently supporting information,
+    not authoritative path-clearance information.
 
 
     ============================================================
@@ -705,7 +664,10 @@ class Autopilot:
     7. Decide which actual rover-sized path is useful and safe.
 
     Do not simply choose whichever sector has the numerically largest
-    near_distance_m or average_distance_m.
+    obstacle_distance_m.
+
+    The directional distance values are broad-sector supporting estimates,
+    not exact travel-corridor clearances.
 
     A very large distance behind the rover does NOT automatically make BACK
     the preferred exploration direction.
@@ -830,11 +792,12 @@ class Autopilot:
             "function": {
                 "name": "scan_environment",
                 "description": (
-                    "Captures a high-res LiDAR scan of the rover's surroundings."
-                    "Use this to gather detailed environmental data whenever"
-                    "telemetry suggests anything worth scanning, or if it has been"
-                    "a while since the last scan. Make sure to make it as cheap as possible"
-                    "by making the scan only 200 rings"
+                    "Capture a high-resolution LiDAR scan when new geometric "
+                    "information is genuinely needed. Do not scan simply because "
+                    "time has passed, because the rover moved, or because the rover "
+                    "turned. Reuse previous LiDAR geometry, camera observations, "
+                    "ultrasonics, heading history, and the persistent map whenever "
+                    "they provide enough information for safe navigation."
                 ),
                 "parameters": {
                     "type": "object",
@@ -1132,35 +1095,71 @@ class Autopilot:
             "LiDAR navigation images to Luna."
         )
 
-    def add_camera_observation(self, filename):
+    def add_camera_observation(
+        self,
+        filename,
+        context="post_movement",
+        detail="low"
+    ):
         """
-        Add a fresh camera image to navigation memory after movement.
+        Add a camera image to Luna's navigation memory.
+
+        context:
+            post_movement
+            post_lidar
+            requested
         """
 
-        image_base64 = self.encode_image(filename)
+        if not filename or not os.path.exists(filename):
+            print(
+                "[AI] Camera observation file unavailable."
+            )
+            return
+
+        context_text = {
+            "post_movement": (
+                "Fresh camera image captured immediately after the "
+                "rover's most recent movement. Use it to verify the "
+                "current travel corridor, obstacles, openings, and "
+                "scene continuity."
+            ),
+
+            "post_lidar": (
+                "Fresh camera image captured immediately after the "
+                "latest LiDAR scan. Compare it with NAVIGATION_XY, "
+                "CORRIDOR_XZ, ultrasonic readings, and the persistent "
+                "map to interpret the current environment."
+            ),
+
+            "requested": (
+                "Fresh camera image requested for navigation. "
+                "Use it with the current LiDAR information, "
+                "ultrasonics, map, heading, and movement history."
+            )
+        }.get(
+            context,
+            "Fresh rover camera image for navigation."
+        )
+
+        image_base64 = self.encode_image(
+            filename
+        )
 
         self.update_memory({
             "role": "user",
             "content": [
                 {
                     "type": "text",
-                    "text": (
-                        "This is a fresh camera image captured immediately "
-                        "after the rover's most recent movement. "
-                        "Use this image together with the latest LiDAR summary, "
-                        "fresh ultrasonic readings, IMU heading, navigation state, "
-                        "and recent movement history. "
-                        "A previous LiDAR scan does not automatically become stale "
-                        "after a short movement. If the visual scene remains "
-                        "consistent and the target path is still safe, continue "
-                        "exploring without requesting another LiDAR scan."
-                    )
+                    "text": context_text
                 },
                 {
                     "type": "image_url",
                     "image_url": {
-                        "url": "data:image/jpeg;base64," + image_base64,
-                        "detail": "low"
+                        "url":
+                            "data:image/jpeg;base64,"
+                            + image_base64,
+                        "detail":
+                            detail
                     }
                 }
             ]
@@ -1226,8 +1225,416 @@ class Autopilot:
             "telemetry_valid": True
         }
     
+    def _handle_lidar_scan(
+        self,
+        call,
+        scanner,
+        ugv_cam,
+        dump_folder,
+        get_current_telemetry
+    ):
+        print("Starting LiDAR scan...")
+
+        lidar_filename = scanner.scan(
+            filepath=dump_folder,
+            visualize=True
+        )
+
+        print(
+            f"Scan saved: {lidar_filename}"
+        )
+
+        lidar_views = scanner.last_visualizations
+
+        print(
+            "[AI] LiDAR visualization files:"
+        )
+
+        for view_name, view_file in lidar_views.items():
+            print(
+                f"    {view_name}: {view_file}"
+            )
+
+        summary = self.summarize_scan_file(
+            lidar_filename
+        )
+
+        print(
+            "\n[LIDAR DEBUG] Environment summary:"
+        )
+
+        print(
+            json.dumps(
+                summary,
+                indent=2
+            )
+        )
+
+        print()
+
+        self.navigation_state[
+            "last_lidar_time"
+        ] = time.time()
+
+        self.navigation_state[
+            "last_lidar"
+        ] = {
+            "zones":
+                summary.get(
+                    "zones",
+                    {}
+                )
+        }
+
+        self.navigation_state[
+            "movement_segments_since_lidar"
+        ] = 0
+
+        self.navigation_state[
+            "yaw_at_last_lidar_deg"
+        ] = (
+            self.navigation_state[
+                "current_yaw_deg"
+            ]
+        )
+
+        self.navigation_state[
+            "heading_change_since_lidar_deg"
+        ] = 0.0
+
+        self.navigation_map.add_lidar_scan(
+            filename=lidar_filename,
+            summary=summary,
+            visualization_files=lidar_views
+        )
+
+        if self.navigation_map_file:
+
+            self.navigation_map.render_map_png(
+                self.navigation_map_file
+            )
+
+        self.update_memory({
+            "role": "tool",
+            "tool_call_id": call.id,
+            "content": json.dumps({
+                "status":
+                    "scan_saved",
+
+                "file_path":
+                    lidar_filename,
+
+                "summary":
+                    summary,
+
+                "navigation_map":
+                    self.navigation_map.get_ai_context()
+            })
+        })
+
+        self.add_lidar_visualizations(
+            lidar_views
+        )
+
+        print(
+            "[AI] GPT requested LiDAR scan. "
+            "Scan complete and summarized. "
+            f"for {call.id}"
+        )
+
+        # ------------------------------------------
+        # AUTOMATIC CAMERA CAPTURE AFTER LIDAR
+        # ------------------------------------------
+
+        if (
+            ugv_cam is not None
+            and ugv_cam.connected
+        ):
+
+            print(
+                "[AI] Capturing camera image "
+                "after LiDAR scan."
+            )
+
+            camera_filename = (
+                ugv_cam.capture_image(
+                    filepath=dump_folder
+                )
+            )
+
+            if camera_filename is not None:
+
+                print(
+                    f"[AI] Camera image saved: "
+                    f"{camera_filename}"
+                )
+
+                self.add_camera_observation(
+                    camera_filename,
+                    context="post_lidar",
+                    detail="high"
+                )
+
+                print(
+                    "[AI] Fresh post-LiDAR camera image "
+                    "added to navigation memory."
+                )
+
+            else:
+
+                print(
+                    "[AI] Camera capture failed "
+                    "after LiDAR scan."
+                )
+
+        else:
+
+            print(
+                "[AI] Camera not connected, "
+                "skipping capture after LiDAR scan."
+            )
+
+        # ------------------------------------------
+        # FRESH SENSOR STATE
+        # ------------------------------------------
+
+        fresh_telemetry = (
+            get_current_telemetry()
+        )
+
+        if isinstance(
+            fresh_telemetry,
+            dict
+        ):
+
+            self.update_navigation_state_from_telemetry(
+                fresh_telemetry
+            )
+
+            fresh_sensor_summary = (
+                self.summarize_telemetry(
+                    fresh_telemetry
+                )
+            )
+
+            self.update_memory({
+                "role": "user",
+                "content": json.dumps({
+                    "fresh_sensor_summary":
+                        fresh_sensor_summary,
+
+                    "current_yaw_deg":
+                        self.navigation_state[
+                            "current_yaw_deg"
+                        ],
+
+                    "observation":
+                        (
+                            "Fresh sensor state immediately "
+                            "after the LiDAR scan and camera "
+                            "capture."
+                        )
+                })
+            })
+
+            print(
+                "[AI] Updated memory with fresh "
+                "post-LiDAR sensor state."
+            )
+
+        else:
+
+            print(
+                "[AI] Failed to retrieve fresh telemetry "
+                "after LiDAR scan."
+            )
+
+
+    def _handle_camera_capture(
+        self,
+        call,
+        ugv_cam,
+        dump_folder
+    ):
+        """
+        Handle an explicit camera request from Luna.
+        """
+
+        print(
+            "[AI] GPT requested camera capture."
+        )
+
+        # ------------------------------------------
+        # CAMERA AVAILABLE?
+        # ------------------------------------------
+
+        if (
+            ugv_cam is None
+            or not ugv_cam.connected
+        ):
+
+            self.update_memory({
+                "role": "tool",
+                "tool_call_id": call.id,
+                "content": json.dumps({
+                    "status": "failed",
+                    "reason": "Camera is not connected"
+                })
+            })
+
+            return
+
+        # ------------------------------------------
+        # CAPTURE IMAGE
+        # ------------------------------------------
+
+        filename = ugv_cam.capture_image(
+            filepath=dump_folder
+        )
+
+        if filename is None:
+
+            self.update_memory({
+                "role": "tool",
+                "tool_call_id": call.id,
+                "content": json.dumps({
+                    "status": "failed",
+                    "reason": "Camera capture failed"
+                })
+            })
+
+            return
+
+        print(
+            f"[AI] Camera image saved: {filename}"
+        )
+
+        # ------------------------------------------
+        # TOOL RESULT
+        # ------------------------------------------
+
+        self.update_memory({
+            "role": "tool",
+            "tool_call_id": call.id,
+            "content": json.dumps({
+                "status": "image_saved",
+                "file_path": filename
+            })
+        })
+
+        # ------------------------------------------
+        # SEND IMAGE TO LUNA
+        # ------------------------------------------
+
+        self.add_camera_observation(
+            filename,
+            context="requested",
+            detail="low"
+        )
+
+        print(
+            "[AI] GPT requested camera capture. "
+            f"Image saved and sent to GPT for {call.id}"
+        )
+
+
+    def _handle_unknown_tool(
+        self,
+        call,
+        name
+    ):
+        """
+        Record an unsupported tool request.
+        """
+
+        print(
+            f"[ERR] GPT requested unknown tool: {name}."
+        )
+
+        self.update_memory({
+            "role": "tool",
+            "tool_call_id": call.id,
+            "content": json.dumps({
+                "status": "failed",
+                "reason": f"Unknown tool: {name}"
+            })
+        })
+
+
+    def _build_navigation_context(
+        self,
+        telemetry
+    ):
+        """
+        Build the compact navigation state sent to Luna.
+
+        Full rover telemetry is still recorded elsewhere.
+        Luna receives only navigation-relevant information.
+        """
+
+        self.update_navigation_state_from_telemetry(
+            telemetry
+        )
+
+        sensor_summary = self.summarize_telemetry(
+            telemetry
+        )
+
+        navigation_state = dict(
+            self.navigation_state
+        )
+
+        last_lidar_time = navigation_state.pop(
+            "last_lidar_time",
+            None
+        )
+
+        if last_lidar_time is None:
+
+            navigation_state[
+                "last_lidar_age_s"
+            ] = None
+
+        else:
+
+            navigation_state[
+                "last_lidar_age_s"
+            ] = round(
+                time.time()
+                - last_lidar_time,
+                1
+            )
+
+        return {
+            "sensor_summary":
+                sensor_summary,
+
+            "navigation_state":
+                navigation_state,
+
+            "navigation_map":
+                self.navigation_map.get_ai_context()
+        }
+
+    def _request_model_action(self):
+        """
+        Ask the current navigation model for the next tool action.
+
+        Keeping the model request in one place will make it easier
+        to replace the cloud model with a local model later.
+        """
+
+        return self.client.chat.completions.create(
+            model=self.model_name,
+            messages=self.memory,
+            tools=Autopilot.aegis_tools,
+            tool_choice="required",
+            parallel_tool_calls=False,
+            reasoning_effort="none"
+        )
 
     def decide_actions(self, telemetry, scanner, ugv_cam, dump_folder, get_current_telemetry):
+
         """
         Ask GPT what to do.
         If GPT requests a LiDAR scan, perform the scan,
@@ -1240,47 +1647,24 @@ class Autopilot:
             "navigation_map_latest.png"
         )
 
-        self.update_navigation_state_from_telemetry(telemetry)
-
-        sensor_summary = self.summarize_telemetry(telemetry)
-
-        navigation_state_for_ai = dict(self.navigation_state)
-
-        last_lidar_time = navigation_state_for_ai.pop(
-            "last_lidar_time",
-            None
+        navigation_context = (
+            self._build_navigation_context(
+                telemetry
+            )
         )
 
-        if last_lidar_time is None:
-            navigation_state_for_ai["last_lidar_age_s"] = None
-        else:
-            navigation_state_for_ai["last_lidar_age_s"] = round(
-                time.time() - last_lidar_time,
-                1
-            )
-        
-        self .update_memory({
+        self.update_memory({
             "role": "user",
-            "content": json.dumps({
-                "telemetry": telemetry,
-                "sensor_summary": sensor_summary,
-                "navigation_state": navigation_state_for_ai,
-                "navigation_map": self.navigation_map.get_ai_context()
-            })
+            "content": json.dumps(
+                navigation_context
+            )
         })
 
-        MAX_TOOL_STEPS =10
+        MAX_TOOL_STEPS = 10
 
         for step in range(MAX_TOOL_STEPS):
 
-            response = self.client.chat.completions.create(
-                model=self.model_name,
-                messages=self.memory,
-                tools=Autopilot.aegis_tools,
-                tool_choice="required",
-                parallel_tool_calls=False,
-                reasoning_effort="none"
-            )
+            response = self._request_model_action()
 
             message = response.choices[0].message
 
@@ -1292,7 +1676,7 @@ class Autopilot:
             if not message.tool_calls:
                 return []
 
-            for call in message.tool_calls:
+            for _ in range(MAX_TOOL_STEPS):
 
                 name = call.function.name
 
@@ -1300,233 +1684,32 @@ class Autopilot:
                     f"[AI] GPT requested tool: {name} "
                     f"(id: {call.id})"
                 )
-
-            # ==========================================
-            # LIDAR
-            # ==========================================
+                    # ==========================================
+                    # LIDAR
+                    # ==========================================
 
                 if name == "scan_environment":
-                    print("Starting LiDAR scan...")
-                    
-                    lidar_filename = scanner.scan(filepath=dump_folder, visualize=True)
-                    print(f"Scan saved: {lidar_filename}")
 
-                    lidar_views = scanner.last_visualizations
-
-                    print("[AI] LiDAR visualization files:")
-                    for view_name, view_file in lidar_views.items():
-                        print(f"    {view_name}: {view_file}")
-                        
-                    summary = self.summarize_scan_file(lidar_filename)
-
-                    # THEN print it
-                    print("\n[LIDAR DEBUG] Environment summary:")
-                    print(json.dumps(summary, indent=2))
-                    print()
-
-                    self.navigation_state["last_lidar_time"] = time.time()  
-
-                    self.navigation_state["last_lidar"] = {
-                        "zones": summary.get("zones", {})
-                    }
-
-                    self.navigation_state["movement_segments_since_lidar"] = 0
-
-                    self.navigation_state["yaw_at_last_lidar_deg"] = (
-                        self.navigation_state["current_yaw_deg"]
+                    self._handle_lidar_scan(
+                        call=call,
+                        scanner=scanner,
+                        ugv_cam=ugv_cam,
+                        dump_folder=dump_folder,
+                        get_current_telemetry=get_current_telemetry
                     )
-
-                    self.navigation_state[
-                        "heading_change_since_lidar_deg"
-                    ] = 0.0
-
-                    self.navigation_map.add_lidar_scan(
-                        filename=lidar_filename,
-                        summary=summary,
-                        visualization_files=lidar_views
-                    )
-
-                    if self.navigation_map_file:
-
-                        self.navigation_map.render_map_png(
-                            self.navigation_map_file
-                        )
-
-                    self.memory.append({
-                        "role": "tool",
-                        "tool_call_id": call.id,
-                        "content": json.dumps({
-                            "status": "scan_saved",
-                            "file_path": lidar_filename,
-                            "summary": summary,
-                            "navigation_map": self.navigation_map.get_ai_context()
-                        })
-                    })
-
-                    self.add_lidar_visualizations(
-                        lidar_views
-                    )
-                        
-                    print(
-                        f"[AI] GPT requested LiDAR scan. Scan complete and summarized."
-                        f"for {call.id}" 
-                    )
-
-                # ==========================================
-                # AUTOMATIC CAMERA CAPTURE AFTER LIDAR
-                # ==========================================
-
-                    if ugv_cam is not None and ugv_cam.connected:
-                        print("[AI] Capturing camera image after LiDAR scan.")
-
-                        camera_filename = ugv_cam.capture_image(
-                            filepath=dump_folder
-                        )
-
-                        if camera_filename is not None:
-                            print(f"[AI] Camera image saved: {camera_filename}")
-
-                            image_base64 = self.encode_image(camera_filename)
-
-                            self.memory.append({
-                                "role": "user",
-                                "content": [
-                                    {
-                                        "type": "text",
-                                        "text": (
-                                            "This is the latest rover camera image. "
-                                            "Analyze it together with the latest LiDAR scan. "
-                                            "information. Identify obstacles, openings, doors, hallways,"
-                                            "terrain, and anything useful for navigation. "
-                                            "Use what you see to decide the safest next action."
-                                        )
-                                    },
-                                    {
-                                        "type": "image_url",
-                                        "image_url": {
-                                            "url": "data:image/jpeg;base64," + image_base64,
-                                            "detail": "high"
-                                        }
-                                    }
-                                ]
-                            })
-
-                            print(
-                                f"[AI] GPT requested camera capture after LiDAR scan. "
-                                f"Image saved and sent to GPT for {call.id}"
-                            )
-
-                        else: 
-                            print("[AI] Camera capture failed after LiDAR scan.")
-
-                    else: 
-                        print("[AI] Camera not connected, skipping capture after LiDAR scan.")
-
-
-                    fresh_telemetry = get_current_telemetry()
-
-                    if isinstance(fresh_telemetry, dict):
-                        fresh_sensor_summary = self.summarize_telemetry(fresh_telemetry)
-
-                        self.update_memory({
-                            "role": "user",
-                            "content": json.dumps({
-                                "telemetry": fresh_telemetry,
-                                "sensor_summary": fresh_sensor_summary,
-                                "observation": ("This is the latest telemetry after the LiDAR scan and camera scan"
-                                "use this ultrasonic readings to decide the next movement."
-                                )
-                            })
-                        })
-
-                        print("[AI] Updated memory with fresh telemetry after LiDAR scan and camera capture.")
-
-                    else:
-                        print("[AI] Failed to retrieve fresh telemetry after LiDAR scan and camera capture.")
 
                     continue
 
-                # ==========================================
-                # CAMERA
-                # ==========================================
+                    # ==========================================
+                    # CAMERA
+                    # ==========================================
                 
                 elif name == "capture_camera":
 
-                    print("[AI] GPT requested camera capture.")
-
-                    if ugv_cam is None or not ugv_cam.connected:
-
-                        tool_result = {
-                            "status": "failed",
-                            "reason": "Camera is not connected"
-                        }
-
-                        self.memory.append({
-                            "role": "tool",
-                            "tool_call_id": call.id,
-                            "content": json.dumps(tool_result)
-                        })
-
-                        continue
-                
-                    filename = ugv_cam.capture_image(
-                        filepath=dump_folder
-                    )
-
-                    if filename is None:
-
-                        self.memory.append({
-                            "role": "tool",
-                            "tool_call_id": call.id,
-                            "content": json.dumps({
-                                "status": "failed",
-                                "reason": "Camera capture failed"
-                            })
-                        })
-
-                        continue
-
-                    print(
-                        f"[AI] Camera image saved: {filename}"
-                    )
-
-                    self.memory.append({
-                        "role": "tool",
-                        "tool_call_id": call.id,
-                        "content": json.dumps({
-                            "status": "image_saved",
-                            "file_path": filename
-                        })
-                    })
-
-                    image_base64 = self.encode_image(filename)
-
-                    self.memory.append({
-                        "role": "user",
-                        "content": [
-                            {
-                                "type": "text",
-                                "text": (
-                                    "This is the latest rover camera image. "
-                                    "Analyze it together with the latest LiDAR scan. "
-                                    "information. Identify obstacles, openings, doors, hallways,"
-                                    "terrain, and anything useful for navigation. "
-                                    "Use what you see to decide the safest next action."
-                                )
-                            },
-                            {
-                                "type": "image_url",
-                                "image_url": {
-                                    "url": "data:image/jpeg;base64," + image_base64,
-                                    "detail": "low"
-                                }
-                            }
-                        ]
-                    })
-
-                    print(
-                        f"[AI] GPT requested camera capture. Image saved and sent to GPT."
-                        f"for {call.id}"
+                    self._handle_camera_capture(
+                        call=call,
+                        ugv_cam=ugv_cam,
+                        dump_folder=dump_folder
                     )
 
                     continue
@@ -1546,6 +1729,7 @@ class Autopilot:
                     # ==========================================
                     # NO-OP
                     # ==========================================
+
                 elif name == "no_op":
 
                     print(
@@ -1556,20 +1740,13 @@ class Autopilot:
 
                     # ==========================================
                     # UNKNOWN TOOL
-                    # ==========================================    
-                else:
-                    print(
-                        f"[ERR] GPT requested unknown tool: {name}. "
-                    )
+                    # ==========================================  
 
-                    self.memory.append({
-                        "role": "tool",
-                        "tool_call_id": call.id,
-                        "content": json.dumps({
-                            "status": "failed",
-                            "reason": f"Unknown tool: {name}"
-                        })
-                    })
+                else:
+                    self._handle_unknown_tool(
+                        call=call,
+                        name=name
+                    )
 
         print(
             "[AI] GPT did not request any actionable tools. "
@@ -1852,7 +2029,7 @@ class Autopilot:
                 movement_record
             )
 
-            # Only keep the most recent 8 movements
+            # Only keep the most recent 20 movements
             self.navigation_state["recent_movements"] = (
                 self.navigation_state["recent_movements"][-20:]
             )
