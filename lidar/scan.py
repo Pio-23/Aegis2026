@@ -243,6 +243,7 @@ class Scanner():
              convert=True,
              save=True,
              visualize=True,
+             debug_3d=False,
              filepath='.') -> str | None:
         """
         Captures, trims, converts, and saves a cloud. Arguments are optional.
@@ -276,14 +277,15 @@ class Scanner():
 
                 self.last_visualizations = create_lidar_visualizations(
                     points=cloud,
-                    output_dir=filepath
+                    output_dir=filepath,
+                    debug_3d=debug_3d
                 )
 
                 print(
                     "[RUN] scan.py: LiDAR visualizations completed."
                 )
 
-                for view_name, view_file in lidar_views.items():
+                for view_name, view_file in self.last_visualizations.items():
                     print(
                         f"[RUN] scan.py: {view_name}: {view_file}"
                     )

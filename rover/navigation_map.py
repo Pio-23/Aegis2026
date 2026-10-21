@@ -41,7 +41,7 @@ class NavigationMap:
     #
     # IMPORTANT:
     # This is intentionally temporary.
-    DUMMY_MOVE_MPS = 1.524 / 3.0
+    MOVE_MPS_AT_050 = 0.396
 
     # ----------------------------------------------------------
     # OCCUPANCY MAP
@@ -59,7 +59,7 @@ class NavigationMap:
 
     # Ignore floor returns.
     FLOOR_CUTOFF_Z = -0.27
-
+    NAV_MAX_Z = 1.0
 
     def __init__(self):
 
@@ -155,8 +155,14 @@ class NavigationMap:
 
         direction = 1.0 if spd >= 0 else -1.0
 
+
+        speed_mps = (
+            self.MOVE_MPS_AT_050
+            * (abs(spd) / 0.50)
+        )
+
         distance_m = (
-            self.DUMMY_MOVE_MPS
+            speed_mps
             * duration_s
             * direction
         )
@@ -403,6 +409,9 @@ class NavigationMap:
                 if (
                     local_z
                     <= self.FLOOR_CUTOFF_Z
+                    or
+                    local_z
+                    >= self.NAV_MAX_Z
                 ):
                     continue
 
@@ -668,7 +677,7 @@ class NavigationMap:
             "temporary_calibration": {
                 "move_mps":
                     round(
-                        self.DUMMY_MOVE_MPS,
+                        self.MOVE_MPS_AT_050,
                         3
                     ),
 
@@ -754,6 +763,7 @@ class NavigationMap:
                 label="Mapped LiDAR geometry"
             )
 
+            ax.invert_xaxis()
 
         # ==========================================================
         # ROVER PATH

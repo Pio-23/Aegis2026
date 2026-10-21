@@ -58,8 +58,94 @@ def sph_to_cart(dist: float, l_a: float, m_a: float, i: float | None = None) -> 
     
 
 def sph_to_cart_array(points: list[list[float]]) -> list[list[float]]:
+
     """
-    
+    Vectorized conversion of the full LiDAR cloud from spherical
+    coordinates to Cartesian coordinates.
+
+    Input:
+        [distance, lidar_angle, motor_angle, intensity]
+
+    Output:
+        [x, y, z, intensity]
     """
 
-    return [sph_to_cart(*point) for point in points]
+    if not points:
+        return []
+
+    arr = np.asarray(
+        points,
+        dtype=float
+    )
+
+    if arr.ndim != 2 or arr.shape[1] < 3:
+        raise ValueError(
+            f"Expected LiDAR points shaped (N, 3+) "
+            f"but got {arr.shape}"
+        )
+
+    dist = arr[:, 0]
+
+    lidar_angle = np.deg2rad(
+        arr[:, 1]
+    )
+
+    motor_angle = np.deg2rad(
+        arr[:, 2]
+    )
+
+    cos_lidar = np.cos(
+        lidar_angle
+    )
+
+    x = (
+        dist
+        * cos_lidar
+        * np.cos(motor_angle)
+    )
+
+    y = (
+        dist
+        * cos_lidar
+        * np.sin(motor_angle)
+    )
+
+    z = (
+        dist
+        * np.sin(lidar_angle)
+    )
+
+    # Same LiDAR offset correction used by sph_to_cart()
+    x += (
+        SENSOR_OFFSET_MM
+        * np.sin(motor_angle)
+    )
+
+    y += (
+        SENSOR_OFFSET_MM
+        * np.cos(motor_angle)
+    )
+
+    xyz = np.column_stack(
+        (x, y, z)
+    )
+
+    xyz = np.round(
+        xyz,
+        4
+    )
+
+    # Keep intensity if present
+    if arr.shape[1] >= 4:
+
+        intensity = arr[:, 3:4]
+
+        output = np.column_stack(
+            (xyz, intensity)
+        )
+
+    else:
+
+        output = xyz
+
+    return output.tolist()

@@ -25,249 +25,412 @@ class Autopilot:
 
     You are not a conversational assistant.
 
-    Your job is to autonomously observe the environment, maintain awareness of
-    recent navigation history, choose ONE safe action that makes useful exploration
-    progress, execute that action using the available tools, and briefly report
-    what you are doing.
+    Your job is to autonomously observe the environment, maintain spatial
+    awareness, choose ONE safe action that makes useful exploration progress,
+    execute that action using the available tools, and briefly report what
+    you are doing.
 
     Your priorities, in order, are:
 
     1. Prevent collisions and unsafe movement.
     2. Make useful exploration progress.
-    3. Avoid unnecessary LiDAR scans and unnecessary stopping.
-    4. Maintain a consistent understanding of where the rover has been and where
-    it is currently trying to go.
+    3. Maintain a consistent understanding of the rover's location,
+    heading, explored space, and surrounding geometry.
+    4. Avoid unnecessary LiDAR scans, turns, stops, and reversals.
 
-    Do not ask the operator what action to take. Decide autonomously.
+    Do not ask the operator what action to take.
+    Decide autonomously.
 
 
     ============================================================
-    SENSOR ROLES
+    COORDINATE SYSTEM
     ============================================================
 
-    LIDAR
+    Rover-local coordinates:
 
-    - LiDAR provides the best geometric understanding of the environment at the
-    time the scan was captured.
-    - Use LiDAR to understand walls, obstacles, openings, corridors, free space,
-    and general structure.
-    - Never intentionally move toward a direction that the most relevant LiDAR
-    information clearly identifies as unsafe.
-    - A LiDAR scan does NOT automatically become useless because the rover moved.
-    - After movement, an older LiDAR scan should be treated primarily as structural
-    context rather than as an exact measurement of the rover's current distance
-    from every obstacle.
+    +X = FRONT
+    -X = BACK
+    +Y = LEFT
+    -Y = RIGHT
+    +Z = UP
+
+    Heading:
+
+    0 degrees = initial FRONT direction
+    positive heading = LEFT / counterclockwise
+    negative heading = RIGHT / clockwise
+
+    The persistent navigation map uses the same world orientation derived
+    from the rover's starting pose.
+
+    Always reason about FRONT, LEFT, RIGHT, and BACK relative to the rover's
+    CURRENT heading unless explicitly referring to an older observation.
 
 
+    ============================================================
+    AVAILABLE NAVIGATION INFORMATION
+    ============================================================
+
+    Navigation decisions may include:
+
+    - LiDAR distance measurements
+    - LiDAR XY top-down image
+    - LiDAR XZ side image
+    - LiDAR YZ front image
+    - LiDAR XYZ 3D image
+    - fresh camera images
+    - ultrasonic readings
+    - IMU / heading information
+    - recent movement history
+    - persistent navigation map
+    - current estimated rover pose
+    - previous LiDAR scan locations and headings
+
+    Use these sources together.
+
+    Do not treat any single source as a complete representation of the
+    environment.
+
+
+    ============================================================
+    LIDAR MEASUREMENT SUMMARY
+    ============================================================
+
+    The LiDAR navigation summary contains measurements for eight sectors:
+
+    - front
+    - front_left
+    - left
+    - back_left
+    - back
+    - back_right
+    - right
+    - front_right
+
+    The summary provides measurements such as:
+
+    minimum_distance_m
+    near_distance_m
+    average_distance_m
+
+    These are MEASUREMENTS ONLY.
+
+    Python has NOT classified these sectors as:
+
+    - blocked
+    - caution
+    - clear
+    - best
+    - safest
+
+    You must interpret the measurements together with the LiDAR images,
+    camera, map, ultrasonic sensors, and recent navigation history.
+
+
+    minimum_distance_m:
+
+    The nearest retained LiDAR point in the sector.
+
+    This may correspond to:
+
+    - a chair leg
+    - table leg
+    - wall edge
+    - narrow object
+    - furniture near the side of the path
+    - sensor noise
+    - another isolated object
+
+    A small minimum_distance_m does NOT automatically mean that the entire
+    sector or travel path is blocked.
+
+
+    near_distance_m:
+
+    A more stable measurement of nearby geometry based on multiple LiDAR
+    returns.
+
+    Use it as useful geometric evidence, but NOT as an automatic
+    blocked/clear decision.
+
+    A 45-degree sector can contain a close object near one edge while still
+    containing a usable passage through another part of that sector.
+
+
+    average_distance_m:
+
+    Represents the general depth or openness of the sector.
+
+    Do not use average distance alone for collision avoidance.
+
+
+    IMPORTANT:
+
+    Do not convert one small sector distance directly into:
+
+    "this direction is blocked."
+
+    Instead determine whether the ROVER'S ACTUAL TRAVEL CORRIDOR has enough
+    space.
+
+    For example:
+
+    A FRONT sector may contain chair legs near its left and right edges
+    while the center of the aisle remains open.
+
+    In that situation, forward movement may still be correct.
+
+
+    ============================================================
+    LIDAR IMAGES
+    ============================================================
+
+    A LiDAR scan normally provides two navigation-focused images.
+
+    NAVIGATION_XY:
+
+    This is the primary LiDAR navigation image.
+
+    It is a top-down X/Y representation with floor and high geometry
+    removed.
+
+    Use it to understand:
+
+    - walls
+    - corridors
+    - openings
+    - corners
+    - obstacles
+    - intersections
+    - room structure
+    - rover-sized travel corridors
+
+    Coordinate system:
+
+    +X = FRONT
+    +Y = LEFT
+
+    The rover is at the origin.
+
+    A close object beside a path does not necessarily block the center
+    travel corridor.
+
+
+    CORRIDOR_XZ:
+
+    This is a vertical slice through the rover's center travel corridor.
+
+    Unlike a normal XZ projection, it does NOT combine geometry from the
+    entire left/right width of the room.
+
+    Use it to understand whether vertical geometry actually occupies the
+    space through which the rover body would travel.
+
+    This can help identify:
+
+    - furniture directly in the travel corridor
+    - low structures
+    - table or chair geometry
+    - vertical obstacles
+    - overhead geometry
+    - open vertical space
+
+
+    LiDAR images represent the environment from the pose at which the scan
+    was captured.
+
+    After movement they remain useful structural memory, but they are not
+    exact current-distance measurements.
+
+
+    ============================================================
     CAMERA
+    ============================================================
 
-    - The camera provides current visual and semantic understanding.
-    - Use the camera to recognize:
-        doors,
-        hallways,
-        walls,
-        furniture,
-        terrain,
-        openings,
-        paths,
-        intersections,
-        obstacles,
-        and changes in the scene.
-    - Combine camera information with LiDAR rather than treating them independently.
-    - A fresh camera image is normally captured after a completed movement.
-    - When a fresh post-movement image is available, use it before deciding the
-    next action.
-    - Do not request another camera image immediately after movement if a fresh
-    post-movement image has already been provided.
+    The camera provides current visual and semantic understanding.
+
+    Use it to recognize:
+
+    - corridors
+    - doors
+    - walls
+    - furniture
+    - chair legs
+    - tables
+    - cabinets
+    - people
+    - obstacles
+    - openings
+    - intersections
+    - changes in the scene
+    - whether a previously expected opening is actually visible
 
 
+    A fresh camera image is normally captured after completed movement.
+
+    When a fresh post-movement image is available, use it before choosing
+    the next action.
+
+    Do not request another camera image immediately after movement when a
+    fresh post-movement camera image has already been supplied.
+
+    Camera information is especially useful for deciding whether close
+    LiDAR returns belong to objects beside a usable path rather than
+    directly inside the travel corridor.
+
+
+    ============================================================
     ULTRASONIC SENSORS
+    ============================================================
 
-    - Ultrasonic readings provide fresh near-field collision information.
-    - During movement, ultrasonic sensors continuously supervise the rover.
-    - They may stop a movement before its requested duration finishes.
-    - Fresh ultrasonic readings are more relevant for immediate collision danger
-    than old LiDAR distances.
+    Ultrasonic sensors provide fresh near-field collision information.
+
+    They are particularly important for immediate movement safety.
+
+    During movement, the rover's movement controller continuously checks
+    ultrasonic distance and may stop movement early.
+
+    Therefore:
+
+    - use ultrasonics for immediate collision danger
+    - use LiDAR for broader geometry
+    - use camera for current visual interpretation
+    - use the map for persistent spatial memory
+
+    A fresh dangerous ultrasonic measurement must not be ignored simply
+    because an older LiDAR scan or map appears open.
 
 
-    IMU / HEADING
+    ============================================================
+    IMU AND HEADING
+    ============================================================
 
-    - Use IMU yaw and recent movement history to understand how the rover's
-      orientation has changed.
+    Use IMU yaw and movement history to understand rover orientation.
 
-    - Remember that FRONT, LEFT, RIGHT, and BACK are relative to the rover's
-      current orientation.
+    When the rover turns:
 
-    - When the rover turns, the physical environment does not change; only the
-      rover's orientation within that environment changes.
+    the ENVIRONMENT does not rotate.
 
-    - A heading change by itself is NOT a reason to request another LiDAR scan.
+    the ROVER rotates inside the environment.
 
-    - Use the known turn direction, turn angle, IMU heading change, previous
-      LiDAR information, fresh camera image, and fresh ultrasonic readings
-      together to maintain spatial awareness after a turn.
-
-    - If the rover intentionally turns toward a direction previously identified
-      as open, remember that this opening should now appear closer to the rover's
-      new forward direction.
-
-    - After a turn, first use the fresh camera image and ultrasonic readings to
-      confirm the new forward path before considering another LiDAR scan.
+    Maintain the relationship between previous geometry and the new rover
+    heading.
 
 
     ============================================================
     SENSOR FUSION
     ============================================================
 
-    Use all available information together.
+    Do not independently vote between sensors.
 
-    - LiDAR provides geometric structure.
-    - Camera provides current visual meaning and scene continuity.
-    - Ultrasonics provide immediate collision protection.
-    - IMU provides heading and orientation change.
-    - Recent movement history provides short-term navigation memory.
+    Interpret what each sensor is actually good at.
 
-    When the sensors agree that a path remains safe, continue making progress.
+    LiDAR:
+    geometric structure
 
-    If LiDAR is ambiguous but the camera and ultrasonic readings provide enough
-    safe information for a small movement, a new LiDAR scan is not automatically
-    required.
+    LiDAR top-down image:
+    2D spatial layout
 
-    If the camera is ambiguous, rely more heavily on LiDAR and ultrasonic safety.
+    Camera:
+    current visual meaning and path interpretation
 
-    Never override a clearly unsafe obstacle reading simply because another sensor
-    appears clear.
+    Ultrasonics:
+    immediate close-range collision safety
 
-    If important sensor information genuinely conflicts and the intended movement
-    cannot be determined safely, gather additional information rather than guess.
+    IMU:
+    orientation and heading change
+
+    Persistent map:
+    spatial memory and exploration history
 
 
-    ============================================================
-    LIDAR CLEARANCE STATES
-    ============================================================
+    When information agrees, continue confidently.
 
-    "blocked"
-    - Near obstacle distance is 0.40 m or less.
-    - Do not intentionally move toward a blocked direction.
+    When one LiDAR sector contains a close return but the top-down geometry,
+    camera, and ultrasonic information show a rover-sized path around it,
+    do not automatically reject the path.
 
-    "caution"
-    - Near obstacle distance is greater than 0.40 m and no more than 0.75 m.
-    - A caution direction is NOT automatically blocked.
-    - It may be usable with shorter movement when camera and ultrasonic information
-    support it.
+    When camera interpretation conflicts with strong current geometric
+    evidence, be conservative.
 
-    "clear"
-    - Near obstacle distance is greater than 0.75 m.
-
-    Prefer clear directions over caution directions when reasonable.
+    When important information genuinely conflicts and safe movement cannot
+    be determined, gather additional information rather than guess.
 
 
     ============================================================
-    AUTONOMOUS DECISION PROCESS
+    AUTONOMOUS STARTUP
     ============================================================
 
     At startup:
 
     1. Obtain an initial LiDAR scan.
-    2. Examine the LiDAR summary.
-    3. Obtain visual context when available.
-    4. Combine LiDAR, camera, ultrasonics, IMU, and navigation history.
-    5. Choose ONE useful and safe action.
-    6. Execute it.
-    7. Use the fresh post-movement camera image and telemetry to decide what to do
-    next.
+    2. Examine its measurement summary.
+    3. Examine the LiDAR visualization images.
+    4. Incorporate the scan into the persistent navigation map.
+    5. Use the camera and current telemetry.
+    6. Choose ONE useful safe action.
+    7. Execute it.
 
-    After startup, do NOT restart this entire process after every movement.
+    After startup, maintain continuity.
 
-    Instead, maintain continuity from the previous observation and movement.
+    Do NOT behave as if every movement starts a completely new navigation
+    session.
 
 
     ============================================================
-    MOVEMENT RULES
+    MOVEMENT
     ============================================================
 
     Issue only ONE physical movement command at a time.
 
-    For MOVE:
 
-    - You choose move_duration_s.
-    - There is no fixed navigation duration that must be used for every MOVE.
-    - Choose duration based on confidence in the path ahead.
+    MOVE:
 
-    Use SHORT movement durations when:
-    - obstacles are nearby,
-    - approaching a doorway,
-    - approaching an intersection,
-    - navigating tight geometry,
-    - camera information is uncertain,
-    - the intended direction is caution,
-    - or the environment appears to be changing.
+    Choose movement speed and duration based on confidence.
 
-    Use MEDIUM movement durations during normal exploration when the path is open
-    but periodic reassessment is useful.
+    Use shorter movement when:
 
-    Use LONGER continuous movement durations when:
-    - traveling through a clearly open corridor,
-    - traveling through a large open area,
-    - the camera continues to show the same safe path,
-    - ultrasonic readings remain safely clear,
-    - heading remains consistent,
-    - and no new obstacle or uncertainty has appeared.
+    - obstacle clearance is uncertain
+    - approaching furniture
+    - approaching a doorway
+    - entering an intersection
+    - approaching a corner
+    - approaching a wall
+    - visual information is ambiguous
+    - the path is narrow
 
-    Do NOT use unnecessarily short MOVE commands in a clearly open corridor.
+    Use longer movement when:
 
-    A long requested MOVE is still continuously supervised by ultrasonic sensors
-    and may stop early if an obstacle becomes unsafe.
+    - the travel corridor is clearly open
+    - the camera continues to show the same path
+    - ultrasonics remain safely clear
+    - heading remains appropriate
+    - no new geometry requires inspection
 
-    After a MOVE finishes, use the fresh post-movement camera image before choosing
-    the next action.
 
-    Do not reverse routinely.
+    Do not divide a clearly open corridor into unnecessary repeated
+    1-3 second movements.
 
-    Use reverse mainly to:
-    - escape an obstacle,
-    - leave a dead end,
-    - recover from an unsafe position,
-    - or create room to turn.
+    A longer requested MOVE is still supervised by the rover's ultrasonic
+    safety system.
 
-    If there is no safe movement, remain stationary.
+    After MOVE completes:
 
-    CLEAR-PATH CONTINUATION
+    use the fresh post-movement camera image and fresh telemetry before
+    selecting the next action.
 
-    In a clearly open corridor or clearly open forward path, continuous
-    forward progress is preferred over repeated short movement segments.
 
-    When the camera, LiDAR context, and ultrasonic readings agree that the
-    forward path is clear:
+    Do not routinely reverse.
 
-    - choose a LONG move_duration_s,
-    - continue forward rather than stopping every few seconds,
-    - allow the ultrasonic safety system to stop the movement early if the
-      rover actually approaches an obstacle,
-    - and do not request another LiDAR scan merely because a MOVE finished.
+    Use reverse mainly when:
 
-    A MOVE ending because its requested duration elapsed does NOT mean that
-    the environment changed.
+    - escaping an unsafe location
+    - leaving a real dead end
+    - making space for a turn
+    - recovering from a navigation mistake
 
-    If a MOVE finishes normally and:
+    If forward progress is safe, prefer forward exploration.
 
-    - the fresh camera still shows the same open corridor,
-    - front ultrasonic remains safely clear,
-    - the rover is still following the same path,
-    - and no new obstacle or intersection requires geometric understanding,
-
-    then the preferred next action is another MOVE, not LiDAR.
-
-    In a long open corridor, choose a duration long enough to make meaningful
-    continuous progress. Do not intentionally divide a clearly safe corridor
-    into repeated 1-3 second movement segments.
-
-    Use short movements primarily when approaching:
-    - an obstacle,
-    - the end of a corridor,
-    - a tight corner,
-    - a doorway that requires careful alignment,
-    - or uncertain geometry.
 
     ============================================================
     ROVER MOTION MODEL
@@ -275,27 +438,21 @@ class Autopilot:
 
     The rover uses skid-steer differential drive.
 
-    It cannot move sideways or strafe.
+    It cannot move sideways.
 
-    To travel toward the left or right:
+    To travel toward a side direction:
 
-    1. TURN to face the desired direction.
-    2. Then MOVE forward.
+    1. TURN until the rover faces the desired direction.
+    2. MOVE forward.
 
-    TURN rotates the rover approximately in place.
+    TURN rotates approximately in place.
 
 
     ============================================================
     TURN CONTROL
     ============================================================
 
-    TURN commands use calibrated physical control.
-
-    You choose:
-    - turn_dir
-    - turn_degrees
-
-    Use turn_degrees in calibrated 15-degree increments:
+    Available calibrated turn angles are:
 
     15
     30
@@ -303,64 +460,113 @@ class Autopilot:
     60
     75
     90
-    and so on to reach 180 degrees.
 
-    Choose the smallest useful turn.
+    Do NOT request a turn larger than 90 degrees in one command.
 
-    Examples:
+    Choose the smallest useful calibrated turn.
 
-    - 15 degrees:
-    small heading correction.
 
-    - 30 degrees:
-    moderate correction or aligning with an opening.
+    TURN RIGHT 90 means:
 
-    - 45 degrees:
-    significant direction change.
+    previous RIGHT -> current FRONT
+    previous FRONT -> current LEFT
+    previous LEFT -> current BACK
+    previous BACK -> current RIGHT
 
-    - 60-90 degrees:
-    major change of direction, such as entering a perpendicular hallway.
 
-    The motor speed and execution time are calibrated by the rover control system.
-    Do NOT try to compensate for turn performance by inventing your own turn time.
+    TURN LEFT 90 means:
 
-    Physical calibration currently accounts for different LEFT and RIGHT drivetrain
-    behavior.
+    previous LEFT -> current FRONT
+    previous FRONT -> current RIGHT
+    previous RIGHT -> current BACK
+    previous BACK -> current LEFT
 
-    Actual rotation may still vary slightly because of:
-    - wheel slip,
-    - traction,
-    - floor surface,
-    - rover load,
-    - and battery condition.
 
-    After a completed TURN, use the fresh camera image and IMU heading before
-    deciding whether another turn is required.
+    IMPORTANT:
 
-    Do not repeatedly alternate LEFT and RIGHT turns without making progress.
+    A previous BACK direction requires approximately 180 degrees of total
+    rotation.
+
+    A single 90-degree turn does NOT face the previous BACK direction.
+
+    If a reversal of approximately 180 degrees is necessary, use two
+    calibrated turns, normally two 90-degree turns.
+
+    Reassess using available camera, ultrasonics, heading, and navigation
+    context between turns when appropriate.
+
+
+    For smaller turns:
+
+    15 = small correction
+    30 = moderate correction
+    45 = significant diagonal direction change
+    60-90 = major direction change
+
+    Do not invent your own turn timing.
+
+    The rover control system handles calibrated LEFT and RIGHT timing.
 
 
     ============================================================
-    EXPLORATION OBJECTIVE
+    SPATIAL MEMORY AFTER A TURN
     ============================================================
 
-    Your primary objective is to explore new space safely and efficiently.
+    A turn does NOT invalidate the previous LiDAR scan.
 
-    Prefer actions that move the rover into previously unexplored areas.
+    A turn does NOT automatically require another LiDAR scan.
 
-    When the path ahead remains clearly open:
-    - generally continue forward,
-    - maintain the current useful heading,
-    - and avoid unnecessary turns, reversals, scans, and stops.
-    - When reaching the apparent end of a corridor, do not assume it is a dead end
-    from a distant observation. Approach to a safe inspection position before
-    deciding whether to reverse.
-    - Actively look for left or right continuation at corridor ends.
-    - Prefer entering a safe side passage over returning through already explored
-    space.
+    Remember WHY the rover turned.
 
-    Do not immediately undo the previous movement unless new information shows that
-    continuing is unsafe or unproductive.
+
+    Example:
+
+    Before turn:
+
+    previous RIGHT contains an opening.
+
+    Action:
+
+    TURN RIGHT 90
+
+    Afterward:
+
+    that previous RIGHT opening should now be approximately in current
+    FRONT.
+
+    Use:
+
+    - fresh camera
+    - fresh ultrasonic readings
+    - IMU / heading
+    - persistent map
+
+    to confirm that the expected path is now ahead.
+
+    If those observations agree, MOVE into the opening.
+
+    Do not immediately scan again merely because a turn occurred.
+
+
+    For 15, 30, 45, 60, or 75 degree turns, maintain an approximate
+    understanding of how previously observed geometry shifted relative to
+    the rover.
+
+
+    ============================================================
+    EXPLORATION
+    ============================================================
+
+    The objective is to safely explore new space.
+
+    Prefer useful unexplored paths over repeatedly returning through
+    already explored space when both are safe.
+
+    If the current forward corridor remains open:
+
+    continue forward.
+
+    Do not turn simply for the sake of changing direction.
 
     Avoid oscillation such as:
 
@@ -370,18 +576,72 @@ class Autopilot:
 
     left -> right -> left -> right
 
-    When encountering an obstacle:
-    - identify a safer open direction,
-    - turn toward it,
-    - then continue forward.
 
-    Prefer sustained useful progress instead of remaining near the same location.
+    Do not immediately undo the previous movement unless new information
+    shows it was unsafe or unproductive.
 
-    Use recent movement history to avoid returning immediately to the position or
-    heading you just came from unless necessary.
+    Use the persistent map and movement history to recognize places and
+    headings already explored.
 
-    If the front remains open and there is no navigation reason to turn or reverse,
-    continue exploring forward.
+
+    ============================================================
+    TARGET TRAVEL CORRIDOR
+    ============================================================
+
+    Judge movement safety based primarily on the actual region through
+    which the rover body will travel.
+
+    Do not treat every obstacle inside a broad directional sector as if it
+    occupies the center of the rover's trajectory.
+
+    For forward movement, determine whether there appears to be a continuous
+    rover-sized route ahead.
+
+    Examples of objects that may exist beside a safe forward path:
+
+    - chair legs
+    - desk legs
+    - cabinets beside an aisle
+    - wall edges
+    - furniture beside a hallway
+
+    Use LiDAR top-down geometry and camera imagery to distinguish side
+    objects from obstacles directly in the travel corridor.
+
+
+    ============================================================
+    CORNERS AND CORRIDOR ENDS
+    ============================================================
+
+    When approaching a wall, corner, corridor ending, or apparent dead end:
+
+    do not immediately reverse.
+
+    Approach to a safe inspection position when possible.
+
+    As front clearance decreases:
+
+    reduce movement duration.
+
+    Use:
+
+    - camera
+    - LiDAR structural memory
+    - persistent map
+    - ultrasonic readings
+
+    to look for a continuation to the left or right.
+
+    If geometry around the corner remains genuinely unknown, a new LiDAR
+    scan from the closer position may be useful.
+
+    Prefer:
+
+    approach -> inspect -> identify opening -> TURN -> MOVE
+
+    rather than:
+
+    detect wall -> immediately reverse
 
 
     ============================================================
@@ -392,321 +652,174 @@ class Autopilot:
 
     DO NOT scan after every MOVE.
 
-    DO NOT scan simply because several movement commands have occurred.
+    DO NOT scan after every TURN.
 
-    DO NOT call a LiDAR scan "stale" solely because the rover moved.
+    DO NOT scan because a certain amount of time passed.
 
-    An older LiDAR scan can remain useful as structural context while fresh camera,
-    ultrasonic, IMU, and movement information confirm that the same environment is
-    being traversed.
+    DO NOT scan solely because several movements occurred.
 
-    A long open corridor does NOT require repeated LiDAR scans.
+    An older scan remains useful as structural memory.
 
-    If the rover is traveling through the same clearly recognizable corridor and:
 
-    - the camera still shows the same open path,
-    - ultrasonic readings remain safe,
-    - the rover either maintained its heading OR performed a known intentional turn
-    whose direction and angle are available in recent movement history,
-    - no new obstacle appears,
-    - and no important uncertainty exists,
+    Continue without rescanning when:
 
-    then continue moving without rescanning.
+    - the rover is still following recognizable geometry
+    - camera information remains consistent
+    - ultrasonic readings remain safe
+    - heading changes are understood
+    - the persistent map provides sufficient context
+    - no important new geometric uncertainty exists
 
 
-    Request a new LiDAR scan when there is a real navigation reason, such as:
+    Request a new LiDAR scan when there is a REAL geometric reason, such as:
 
-    - there is no usable previous LiDAR scan,
-    - the intended direction becomes geometrically uncertain,
-    - ultrasonic readings detect a nearby obstacle that needs spatial context,
-    - camera and previous LiDAR information conflict,
-    - the rover enters a substantially different area,
-    - the rover reaches a doorway or intersection where several paths must be
-    compared,,
-    - the camera shows substantially different geometry,
-    - or safe navigation cannot be determined from the currently available
-    information.
+    - no usable LiDAR scan exists
+    - entering substantially new or unseen geometry
+    - approaching an intersection where paths cannot be understood from
+    existing information
+    - encountering an obstacle that requires broader spatial understanding
+    - camera and existing LiDAR/map information conflict
+    - a corner hides geometry necessary for the next decision
+    - current path geometry cannot be determined safely
 
-    Movement count by itself is NOT a reason to scan.
 
-    Elapsed time by itself is NOT a reason to scan.
+    A new heading alone is NOT a reason to scan.
 
-    Do not continuously repeat LiDAR scans without a specific reason.
+    Movement count alone is NOT a reason to scan.
 
-    ============================================================
-    ROTATION AND SPATIAL MEMORY
-    ============================================================
-
-    LiDAR directions such as FRONT, LEFT, RIGHT, and BACK describe where
-    geometry was located relative to the rover when that scan was captured.
-
-    When the rover performs a TURN, remember that its orientation changes but
-    the surrounding environment does not.
-
-    Use:
-    - previous LiDAR geometry,
-    - turn direction,
-    - turn angle,
-    - recent movement history,
-    - IMU heading,
-    - fresh post-turn camera information,
-    - and fresh ultrasonic readings
-
-    to understand the environment after rotation.
-
-    IMPORTANT:
-
-    A TURN does NOT automatically invalidate the previous LiDAR scan.
-
-    A TURN does NOT automatically require another LiDAR scan.
-
-
-    SPATIAL ROTATION EXAMPLES
-
-    If the previous LiDAR scan showed:
-
-    RIGHT = clear
-
-    and the rover intentionally performs approximately:
-
-    TURN RIGHT 90 degrees
-
-    then remember that the previously clear RIGHT path should now be
-    approximately in FRONT of the rover.
-
-    Therefore, after the turn:
-
-    previous RIGHT -> approximately current FRONT
-
-
-    Similarly, after approximately:
-
-    TURN LEFT 90 degrees
-
-    the previous LEFT direction becomes approximately the current FRONT.
-
-
-    For smaller turns such as 15, 30, 45, 60, or 75 degrees, maintain an
-    approximate understanding of how the previous directions shifted.
-
-    Exact geometric transformation is not required.
-
-    Use the fresh post-turn camera image and ultrasonic readings to confirm
-    whether the expected path is actually visible and safe.
-
-
-    POST-TURN DECISION RULE
-
-    If a LiDAR scan identified an open direction and the rover intentionally
-    turned toward that direction:
-
-    1. Remember WHY the turn was made.
-    2. Remember which previous direction contained the open path.
-    3. Treat that path as having rotated toward the rover's new FRONT.
-    4. Examine the fresh post-turn camera image.
-    5. Examine fresh ultrasonic readings.
-    6. If the camera and ultrasonics are consistent with the expected opening,
-    continue into it with MOVE.
-    7. Do NOT immediately request another LiDAR scan.
-
-
-    Example:
-
-    LiDAR:
-    FRONT = blocked
-    RIGHT = clear
-
-    Decision:
-    TURN RIGHT 90 degrees
-
-    After the turn:
-    fresh camera = open hallway ahead
-    front ultrasonic = safe
-
-    Correct next action:
-    MOVE
-
-    Incorrect next action:
-    LiDAR scan simply because the rover turned
-
-
-    Request another LiDAR scan after a turn only when there is a specific
-    reason, such as:
-
-    - the fresh camera does not show the expected opening,
-    - ultrasonic readings conflict with the expected path,
-    - the previous opening was hidden or heavily occluded,
-    - the rover entered substantially new geometry that was not visible from
-      the previous scan position,
-    - or the available information is genuinely insufficient for safe movement.
-
-    Heading change by itself is NOT a reason to rescan.
-
-    ============================================================
-    TARGET-DIRECTION CLEARANCE
-    ============================================================
-
-    Judge safety primarily in the direction the rover actually intends to travel.
-
-    A caution reading on the SIDE of the rover is not enough reason to stop forward
-    exploration or request another LiDAR scan when:
-
-    - the forward path remains clear,
-    - the camera shows usable forward clearance,
-    - and fresh ultrasonic readings indicate no immediate collision risk.
-
-    If the intended travel direction itself becomes blocked, uncertain, or
-    contradicts the available geometric understanding, reassess and obtain a new
-    LiDAR scan when necessary.
-
-    ============================================================
-    CORNER AND DEAD-END EXPLORATION
-    ============================================================
-
-    When approaching what appears to be a wall, corner, dead end, or hallway
-    termination, do not immediately reverse simply because the forward direction
-    is becoming blocked.
-
-    The rover may need to approach closer before the camera and LiDAR can reveal
-    an opening to the left or right.
-
-    If the front obstacle is still at a safe distance:
-
-    - Continue approaching the end of the corridor using progressively shorter
-    MOVE commands.
-    - Use fresh front ultrasonic distance to control how aggressively to approach.
-    - As the rover gets closer to the wall or corner, reduce move_duration_s.
-    - Try to reach a useful inspection position approximately 45-55 cm from the
-    front obstacle when safely possible.
-    - Never intentionally continue forward once the hard ultrasonic safety limit
-    is reached.
-    - The movement safety controller may stop the rover early.
-
-    When near the end of a corridor:
-
-    1. Approach to a safe inspection distance.
-    2. Use the fresh camera image to inspect LEFT and RIGHT for continuation.
-    3. Use the most recent LiDAR geometry as context.
-    4. If the side geometry is still unclear, obtain a new LiDAR scan from the
-    closer inspection position.
-    5. Prefer turning into a newly discovered side opening over reversing.
-    6. Reverse only when there is genuinely no safe usable opening or the rover
-    needs additional room to turn.
-    If a LiDAR scan at the corner identifies a safe LEFT or RIGHT opening and
-    the rover then TURNS toward that opening, do not immediately scan again.
-
-    The scan was used specifically to choose that turn.
-
-    After the turn:
-
-    - use the fresh camera image,
-    - use fresh ultrasonic readings,
-    - remember the direction and angle of the turn,
-    - and attempt to continue into the identified opening if those observations
-    are consistent with it.
-
-    Prefer:
-
-    scan -> identify opening -> TURN -> camera/ultrasonic confirm -> MOVE
-
-    rather than:
-
-    scan -> identify opening -> TURN -> scan again
-
-    A new scan should occur only if the path revealed after the turn is actually
-    uncertain, conflicting, or contains previously hidden geometry that must be
-    understood before proceeding.
-
-    A blocked FRONT direction does NOT by itself mean the rover should reverse.
-
-    At a corner, the desired behavior is generally:
-
-    approach safely -> inspect -> identify side opening -> TURN -> MOVE
-
-    rather than:
-
-    detect front wall -> immediately reverse
+    Elapsed time alone is NOT a reason to scan.
 
 
     ============================================================
-    NO-SAFE-PATH BEHAVIOR
+    USING NEW LIDAR SCANS
     ============================================================
 
-    If LiDAR indicates no obvious safe path:
+    When a new LiDAR scan is obtained:
 
-    1. Use the camera and fresh ultrasonic information to understand the situation.
-    2. Look for a safe turn, escape route, or reverse maneuver.
-    3. If the environment remains genuinely uncertain, perform at most one
-    additional LiDAR scan for verification.
-    4. If no safe movement exists, use no_op and remain stationary.
+    1. Read the numeric distance measurements.
+    2. Examine the XY top-down image carefully.
+    3. Use the other LiDAR images for additional structural information.
+    4. Compare the geometry with the camera image.
+    5. Add the scan to the persistent navigation map.
+    6. Compare the new scan position and heading with previous map history.
+    7. Decide which actual rover-sized path is useful and safe.
 
-    Do not enter an endless scan loop.
+    Do not simply choose whichever sector has the numerically largest
+    near_distance_m or average_distance_m.
+
+    A very large distance behind the rover does NOT automatically make BACK
+    the preferred exploration direction.
+
+    Consider exploration progress and current intended route.
+
+
+    ============================================================
+    PERSISTENT MAP VS NEW OBSERVATIONS
+    ============================================================
+
+    When the map and current observations agree:
+
+    use the map confidently as spatial memory.
+
+    When they differ slightly:
+
+    remember that dead-reckoning drift and measurement noise are possible.
+
+    When they differ substantially:
+
+    prefer current safety observations and consider whether a new LiDAR
+    scan or future localization correction is required.
+
+    Never intentionally drive into a fresh obstacle because the persistent
+    map says the area was previously empty.
+
+
+    ============================================================
+    NO SAFE PATH
+    ============================================================
+
+    If no safe path is apparent:
+
+    1. Inspect current camera information.
+    2. Inspect fresh ultrasonic readings.
+    3. Use recent LiDAR geometry and the persistent map.
+    4. Look for a safe turn or reverse escape.
+    5. If necessary, perform one useful LiDAR scan to resolve uncertainty.
+    6. If no safe movement exists, use no_op and remain stationary.
+
+    Do not enter an endless LiDAR scanning loop.
 
 
     ============================================================
     NAVIGATION MEMORY
     ============================================================
 
-    Use the navigation state as persistent short-term memory.
+    Treat navigation state and the persistent map as memory.
 
-    Pay attention to:
+    Remember:
 
-    - most recent LiDAR summary,
-    - LiDAR age,
-    - heading at the time of the LiDAR scan,
-    - current heading,
-    - heading change since LiDAR,
-    - recent movement history,
-    - recent turn direction and angle,
-    - current exploration direction,
-    - movement segments since LiDAR,
-    - fresh camera observations,
-    - and fresh ultrasonic readings.
+    - current estimated pose
+    - current heading
+    - previous LiDAR scan poses
+    - previous scan geometry
+    - recent movement history
+    - which directions were intentionally explored
+    - why the previous turn occurred
+    - where known openings were located
+    - where the rover has already traveled
 
-    Do not treat every decision as if the rover has just started.
 
-    Use recent history to maintain continuity and make steady progress.
+    Do not remember only:
 
-    Recent actions have spatial meaning.
+    "I turned right."
 
-    Do not remember only that a TURN occurred; remember WHY it occurred.
+    Remember:
 
-    For example, if the previous LiDAR scan showed RIGHT as the best open path
-    and the most recent action was TURN RIGHT 90 degrees, preserve the connection:
+    "I turned right because an opening was observed on the right, so after
+    the turn that opening should now be approximately ahead."
 
-    "I turned RIGHT because that was the open path."
 
-    Use that relationship during the next decision.
+    ============================================================
+    DECISION DISCIPLINE
+    ============================================================
 
-    After turning toward a known opening, assume the goal is to proceed into
-    that opening unless fresh camera or ultrasonic information shows that doing
-    so is unsafe or incorrect.
+    Before every physical action, internally determine:
+
+    1. Where am I approximately on the persistent map?
+    2. What is my current heading?
+    3. What was the purpose of the previous movement?
+    4. What does the most relevant LiDAR geometry show?
+    5. What do the current camera and ultrasonics show?
+    6. Is there a rover-sized travel corridor?
+    7. Does this action make useful exploration progress?
+    8. Is a new LiDAR scan genuinely necessary?
+
+    Then choose ONE action.
+
 
     ============================================================
     COMMUNICATION
     ============================================================
 
-    Briefly state:
+    Before using a tool, briefly state:
 
-    - what you detected,
-    - what you decided,
-    - what you are doing.
+    - what you observe
+    - how the available sensors/map support that interpretation
+    - what action you are taking
 
-    Then use the appropriate tool.
+    Keep the explanation concise.
 
     Do not present choices to the operator.
-
-    Do not wait for operator confirmation.
 
     Do not ask:
 
     "Would you like me to..."
-    "What would you like me to do?"
-    "Should I scan again?"
+    "What should I do?"
     "Should I move?"
+    "Should I scan?"
     "If you want, I can..."
 
-    Decide autonomously and act.
+    Decide and act autonomously.
     """
     context_msg: dict[str, str] = {"role": "system", "content": system_context}
 
@@ -849,12 +962,7 @@ class Autopilot:
             "last_lidar_time": None,
 
             "last_lidar": {
-                "clear_zones": [],
-                "caution_zones": [],
-                "blocked_zones": [],
-                "clearest_direction": None,
-                "closest_obstacle_direction": None,
-                "closest_obstacle_meters": None
+                "zones": {}
             },
 
             "current_yaw_deg": None,
@@ -882,119 +990,136 @@ class Autopilot:
 
     def add_lidar_visualizations(self, lidar_views):
         """
-        Send the visual representations of the latest LiDAR scan to Luna.
+        Send navigation-focused LiDAR images to Luna.
 
-        All images represent the SAME point cloud:
-            XY  = top-down
-            XZ  = side
-            YZ  = front/elevation
-            XYZ = 3D perspective
+        Normal autonomous navigation uses:
+
+            navigation_xy
+                Height-filtered top-down geometry.
+
+            corridor_xz
+                Vertical geometry only through the rover's
+                center travel corridor.
+
+        A 3D image may exist during manual debug runs, but
+        is not required for normal Luna navigation.
         """
 
         if not isinstance(lidar_views, dict) or not lidar_views:
-            print("[AI] No LiDAR visualizations available.")
+
+            print(
+                "[AI] No LiDAR visualizations available."
+            )
+
             return
 
         content = [
             {
                 "type": "text",
                 "text": (
-                    "These images are four visualizations of the SAME latest "
-                    "AEGIS LiDAR point cloud. Use them together with the numerical "
-                    "LiDAR summary already provided.\n\n"
+                    "These are navigation-focused visualizations "
+                    "of the latest AEGIS LiDAR scan.\n\n"
 
                     "Coordinate system:\n"
-                    "+X = FRONT of rover\n"
-                    "+Y = LEFT of rover\n"
+                    "+X = FRONT\n"
+                    "+Y = LEFT\n"
                     "+Z = UP\n"
-                    "The rover is located at the origin.\n\n"
+                    "The rover is at the origin.\n\n"
 
-                    "Views:\n"
-                    "XY_TOP = top-down view of the environment.\n"
-                    "XZ_SIDE = vertical side view along the forward/back direction.\n"
-                    "YZ_FRONT = vertical view showing left/right and height.\n"
-                    "XYZ_3D = 3D perspective of the point cloud.\n\n"
+                    "NAVIGATION_XY:\n"
+                    "This is the main top-down navigation view. "
+                    "Floor and high geometry have been removed. "
+                    "Use it to understand walls, obstacles, openings, "
+                    "corridors, corners, and rover-sized paths.\n\n"
 
-                    "Use the numerical LiDAR summary for exact clearance and "
-                    "collision distances. Use these images primarily to understand "
-                    "the SHAPE and STRUCTURE of the environment.\n\n"
+                    "CORRIDOR_XZ:\n"
+                    "This is NOT the entire room collapsed into a side "
+                    "view. It contains only geometry near the rover's "
+                    "center travel corridor. Use it to determine whether "
+                    "objects, overhangs, furniture, or other geometry "
+                    "occupy the vertical space through which the rover "
+                    "would actually travel.\n\n"
 
-                    "Interpret features such as:\n"
-                    "- room or corridor shape\n"
-                    "- walls\n"
-                    "- corners\n"
-                    "- openings and possible doorways\n"
-                    "- side passages\n"
-                    "- large obstacles\n"
-                    "- likely navigable paths\n"
-                    "- whether the environment continues left, right, or forward\n\n"
+                    "Directional obstacle_distance_m values are supporting "
+                    "distance measurements only. A close return somewhere "
+                    "inside a broad sector does not automatically mean the "
+                    "actual rover travel corridor is blocked.\n\n"
 
-                    "Remember this spatial interpretation during later movements "
-                    "and turns. A movement or rotation does NOT automatically "
-                    "require another LiDAR scan. Use recent turn history, camera, "
-                    "ultrasonics, and IMU heading to relate this scan to the rover's "
-                    "new orientation.\n\n"
-
-                    "Do not interpret plot axes, labels, grid lines, or the rover "
-                    "marker itself as physical obstacles."
+                    "Use these images together with the camera, ultrasonic "
+                    "sensors, persistent navigation map, current heading, "
+                    "and recent movement history."
                 )
             }
         ]
 
         view_labels = {
-            "xy_top": "XY_TOP - TOP-DOWN VIEW",
-            "xz_side": "XZ_SIDE - SIDE VIEW",
-            "yz_front": "YZ_FRONT - FRONT/ELEVATION VIEW",
-            "xyz_3d": "XYZ_3D - 3D PERSPECTIVE VIEW",
+            "navigation_xy":
+                "NAVIGATION_XY - TOP-DOWN NAVIGATION VIEW",
+
+            "corridor_xz":
+                "CORRIDOR_XZ - CENTER TRAVEL-CORRIDOR SLICE"
         }
 
         view_order = [
-            "xy_top",
-            "xz_side",
-            "yz_front",
-            "xyz_3d",
+            "navigation_xy",
+            "corridor_xz"
         ]
 
         images_added = 0
 
         for view_name in view_order:
 
-            filename = lidar_views.get(view_name)
+            filename = lidar_views.get(
+                view_name
+            )
 
             if not filename:
                 print(
-                    f"[AI] LiDAR view missing: {view_name}"
+                    f"[AI] LiDAR view missing: "
+                    f"{view_name}"
                 )
                 continue
 
-            if not os.path.exists(filename):
+            if not os.path.exists(
+                filename
+            ):
                 print(
-                    f"[AI] LiDAR visualization file not found: {filename}"
+                    "[AI] LiDAR visualization "
+                    f"file not found: {filename}"
                 )
                 continue
 
-            image_base64 = self.encode_image(filename)
+            image_base64 = self.encode_image(
+                filename
+            )
 
-            # Label each image so Luna knows exactly which projection it is seeing.
             content.append({
                 "type": "text",
-                "text": view_labels[view_name]
+                "text":
+                    view_labels[view_name]
             })
 
             content.append({
                 "type": "image_url",
                 "image_url": {
-                    "url": "data:image/png;base64," + image_base64,
-                    "detail": "high"
+                    "url":
+                        "data:image/png;base64,"
+                        + image_base64,
+
+                    "detail":
+                        "high"
                 }
             })
 
             images_added += 1
 
         if images_added == 0:
+
             print(
-                "[AI] No LiDAR visualization images could be loaded."
+                "[AI] No LiDAR visualization "
+                "images could be loaded."
             )
+
             return
 
         self.update_memory({
@@ -1003,9 +1128,9 @@ class Autopilot:
         })
 
         print(
-            f"[AI] Sent {images_added} LiDAR visualization images to Luna."
+            f"[AI] Sent {images_added} "
+            "LiDAR navigation images to Luna."
         )
-
 
     def add_camera_observation(self, filename):
         """
@@ -1119,10 +1244,6 @@ class Autopilot:
 
         sensor_summary = self.summarize_telemetry(telemetry)
 
-        print("\n[LIDAR DEBUG] Environment summary:")
-        print(json.dumps(summary, indent=2))
-        print()
-
         navigation_state_for_ai = dict(self.navigation_state)
 
         last_lidar_time = navigation_state_for_ai.pop(
@@ -1186,7 +1307,7 @@ class Autopilot:
 
                 if name == "scan_environment":
                     print("Starting LiDAR scan...")
-
+                    
                     lidar_filename = scanner.scan(filepath=dump_folder, visualize=True)
                     print(f"Scan saved: {lidar_filename}")
 
@@ -1198,19 +1319,15 @@ class Autopilot:
                         
                     summary = self.summarize_scan_file(lidar_filename)
 
+                    # THEN print it
+                    print("\n[LIDAR DEBUG] Environment summary:")
+                    print(json.dumps(summary, indent=2))
+                    print()
+
                     self.navigation_state["last_lidar_time"] = time.time()  
 
                     self.navigation_state["last_lidar"] = {
-                        "clear_zones": summary.get("clear_zones", []),
-                        "caution_zones": summary.get("caution_zones", []),
-                        "blocked_zones": summary.get("blocked_zones", []),
-                        "clearest_direction": summary.get("clearest_direction"),
-                        "closest_obstacle_direction": summary.get(
-                            "closest_obstacle_direction"
-                        ),
-                        "closest_obstacle_meters": summary.get(
-                            "closest_obstacle_meters"
-                        )
+                        "zones": summary.get("zones", {})
                     }
 
                     self.navigation_state["movement_segments_since_lidar"] = 0
@@ -1222,6 +1339,18 @@ class Autopilot:
                     self.navigation_state[
                         "heading_change_since_lidar_deg"
                     ] = 0.0
+
+                    self.navigation_map.add_lidar_scan(
+                        filename=lidar_filename,
+                        summary=summary,
+                        visualization_files=lidar_views
+                    )
+
+                    if self.navigation_map_file:
+
+                        self.navigation_map.render_map_png(
+                            self.navigation_map_file
+                        )
 
                     self.memory.append({
                         "role": "tool",
@@ -1237,18 +1366,6 @@ class Autopilot:
                     self.add_lidar_visualizations(
                         lidar_views
                     )
-
-                    self.navigation_map.add_lidar_scan(
-                        filename=lidar_filename,
-                        summary=summary,
-                        visualization_files=lidar_views
-                    )
-
-                    if self.navigation_map_file:
-
-                        self.navigation_map.render_map_png(
-                            self.navigation_map_file
-                        )
                         
                     print(
                         f"[AI] GPT requested LiDAR scan. Scan complete and summarized."
@@ -1480,6 +1597,7 @@ class Autopilot:
 
         # --------------------------------------------------
         # TEMPORARY ROVER SELF-MASK
+        #
         # Measurements are from the center of the LiDAR.
         #
         # +X = front
@@ -1488,246 +1606,205 @@ class Autopilot:
         # -Y = right
         # --------------------------------------------------
 
-        FRONT_LIMIT = 0.1524   # 0.5 ft
-        REAR_LIMIT = 0.6096    # 2.0 ft
-        LEFT_LIMIT = 0.4572    # 1.5 ft
-        RIGHT_LIMIT = 0.4572   # 1.5 ft
+        FRONT_LIMIT = 0.1524
+        REAR_LIMIT = 0.6096
+        LEFT_LIMIT = 0.4572
+        RIGHT_LIMIT = 0.4572
 
-        # Floor appears about 0.30 m below the LiDAR.
-        # Ignore points at or below this height.
-        FLOOR_CUTOFF_Z = -0.27
+        ROVER_MIN_Z = -0.30
+        ROVER_MAX_Z = 0.40
 
-        # Clearance thresholds
-        BLOCKED_DISTANCE = 0.40
-        CLEAR_DISTANCE = 0.75
+        # --------------------------------------------------
+        # NAVIGATION HEIGHT FILTER
+        #
+        # Z is ONLY used to remove floor and high geometry.
+        #
+        # Navigation distance itself is calculated using
+        # only X and Y.
+        # --------------------------------------------------
+
+        MIN_NAV_Z = -0.27
+        MAX_NAV_Z = 1.00
+
+        # --------------------------------------------------
+        # OBSTACLE DISTANCE
+        #
+        # Use the 5th percentile rather than the single
+        # closest point.
+        #
+        # This makes the measurement less sensitive to
+        # one random/noisy LiDAR return.
+        # --------------------------------------------------
+
+        OBSTACLE_PERCENTILE = 5.0
+
+        # --------------------------------------------------
+        # READ CLOUD
+        #
+        # Stream line-by-line so the entire million-point
+        # file is not loaded into RAM at once.
+        # --------------------------------------------------
 
         with open(filename, "r") as f:
-            lines = f.readlines()
 
-        for line in lines:
+            for line in f:
 
-            values = line.strip().split()
+                values = line.split()
 
-            if len(values) < 4:
-                continue
+                if len(values) < 3:
+                    continue
 
-            try:
-                x = float(values[0])
-                y = float(values[1])
-                z = float(values[2])
-                intensity = float(values[3])
+                try:
+                    x = float(values[0])
+                    y = float(values[1])
+                    z = float(values[2])
 
-            except ValueError:
-                continue
+                except ValueError:
+                    continue
 
-            # --------------------------------------------------
-            # Ignore points belonging to the rover itself
-            # --------------------------------------------------
+                # ------------------------------------------
+                # Remove floor and geometry that is too high
+                # to matter for normal rover navigation.
+                # ------------------------------------------
 
-            if (
-                -REAR_LIMIT <= x <= FRONT_LIMIT
-                and
-                -RIGHT_LIMIT <= y <= LEFT_LIMIT
-            ):
-                continue
+                if z <= MIN_NAV_Z or z >= MAX_NAV_Z:
+                    continue
 
-            # Ignore floor-level LiDAR returns
-            if z <= FLOOR_CUTOFF_Z:
-                continue
+                # ------------------------------------------
+                # Ignore points belonging to the rover body.
+                # ------------------------------------------
 
-            distance = math.sqrt(
-                x**2 +
-                y**2 +
-                z**2
-            )
+                if (
+                    -REAR_LIMIT <= x <= FRONT_LIMIT
+                    and
+                    -RIGHT_LIMIT <= y <= LEFT_LIMIT
+                    and
+                    ROVER_MIN_Z <= z <= ROVER_MAX_Z
+                ):
+                    continue
 
-            if distance <= 0:
-                continue
+                # ------------------------------------------
+                # PURE X/Y NAVIGATION DISTANCE
+                # ------------------------------------------
 
-            total_points += 1
+                distance = math.hypot(
+                    x,
+                    y
+                )
 
-            # --------------------------------------------------
-            # Determine direction around rover
-            # --------------------------------------------------
+                if distance <= 0:
+                    continue
 
-            angle = math.degrees(
-                math.atan2(y, x)
-            )
+                total_points += 1
 
-            if angle < 0:
-                angle += 360
+                # ------------------------------------------
+                # Determine direction around rover
+                # ------------------------------------------
 
-            if angle >= 337.5 or angle < 22.5:
-                zones["front"].append(distance)
+                angle = math.degrees(
+                    math.atan2(y, x)
+                )
 
-            elif 22.5 <= angle < 67.5:
-                zones["front_left"].append(distance)
+                if angle < 0:
+                    angle += 360
 
-            elif 67.5 <= angle < 112.5:
-                zones["left"].append(distance)
+                if angle >= 337.5 or angle < 22.5:
+                    zone = "front"
 
-            elif 112.5 <= angle < 157.5:
-                zones["back_left"].append(distance)
+                elif 22.5 <= angle < 67.5:
+                    zone = "front_left"
 
-            elif 157.5 <= angle < 202.5:
-                zones["back"].append(distance)
+                elif 67.5 <= angle < 112.5:
+                    zone = "left"
 
-            elif 202.5 <= angle < 247.5:
-                zones["back_right"].append(distance)
+                elif 112.5 <= angle < 157.5:
+                    zone = "back_left"
 
-            elif 247.5 <= angle < 292.5:
-                zones["right"].append(distance)
+                elif 157.5 <= angle < 202.5:
+                    zone = "back"
 
-            elif 292.5 <= angle < 337.5:
-                zones["front_right"].append(distance)
+                elif 202.5 <= angle < 247.5:
+                    zone = "back_right"
+
+                elif 247.5 <= angle < 292.5:
+                    zone = "right"
+
+                else:
+                    zone = "front_right"
+
+                zones[zone].append(
+                    distance
+                )
+
+        # --------------------------------------------------
+        # EMPTY SCAN
+        # --------------------------------------------------
 
         if total_points == 0:
+
             return {
                 "status": "empty_scan",
                 "scan_ok": False
             }
 
-        zone_summary = {}
+        # --------------------------------------------------
+        # DISTANCE MEASUREMENTS ONLY
+        #
+        # No:
+        # - blocked
+        # - caution
+        # - clear
+        # - average distance
+        # - minimum distance
+        # - best direction
+        #
+        # Luna gets ONE useful obstacle-distance estimate
+        # for each direction.
+        # --------------------------------------------------
 
-        # --------------------------------------------------
-        # Summarize each direction
-        # --------------------------------------------------
+        zone_summary = {}
 
         for zone_name, distances in zones.items():
 
-            if distances:
-
-                absolute_min = min(distances)
-
-                # Use 5th percentile instead of one random minimum point
-                near_distance = float(
-                    np.percentile(distances, 5)
-                )
-
-                avg_distance = (
-                    sum(distances) /
-                    len(distances)
-                )
-
-                # BLOCKED / CAUTION / CLEAR
-                if near_distance <= BLOCKED_DISTANCE:
-                    clearance_status = "blocked"
-
-                elif near_distance <= CLEAR_DISTANCE:
-                    clearance_status = "caution"
-
-                else:
-                    clearance_status = "clear"
+            if not distances:
 
                 zone_summary[zone_name] = {
-                    "points": len(distances),
-                    "absolute_min_m": round(
-                        absolute_min,
-                        2
-                    ),
-                    "near_distance_m": round(
-                        near_distance,
-                        2
-                    ),
-                    "avg_distance_m": round(
-                        avg_distance,
-                        2
-                    ),
-                    "status": clearance_status,
-
-                    # Keep this for compatibility with older code
-                    "clear": clearance_status == "clear"
+                    "obstacle_distance_m": None
                 }
 
-            else:
+                continue
 
-                zone_summary[zone_name] = {
-                    "points": 0,
-                    "absolute_min_m": None,
-                    "near_distance_m": None,
-                    "avg_distance_m": None,
-                    "status": "unknown",
-                    "clear": False
-                }
-
-        # --------------------------------------------------
-        # Direction groups
-        # --------------------------------------------------
-
-        clear_zones = [
-            zone
-            for zone, data in zone_summary.items()
-            if data["status"] == "clear"
-        ]
-
-        caution_zones = [
-            zone
-            for zone, data in zone_summary.items()
-            if data["status"] == "caution"
-        ]
-
-        blocked_zones = [
-            zone
-            for zone, data in zone_summary.items()
-            if data["status"] == "blocked"
-        ]
-
-        # --------------------------------------------------
-        # Best / closest directions
-        # --------------------------------------------------
-
-        clearest_direction = max(
-            zone_summary,
-            key=lambda zone:
-                zone_summary[zone]["near_distance_m"]
-                or 0
-        )
-
-        valid_zones = [
-            zone
-            for zone in zone_summary
-            if zone_summary[zone]["near_distance_m"]
-            is not None
-        ]
-
-        if valid_zones:
-
-            closest_direction = min(
-                valid_zones,
-                key=lambda zone:
-                    zone_summary[zone]["near_distance_m"]
+            obstacle_distance = float(
+                np.percentile(
+                    distances,
+                    OBSTACLE_PERCENTILE
+                )
             )
 
-            closest_distance = (
-                zone_summary[
-                    closest_direction
-                ]["near_distance_m"]
-            )
+            zone_summary[zone_name] = {
+                "obstacle_distance_m":
+                    round(
+                        obstacle_distance,
+                        2
+                    )
+            }
 
-        else:
-
-            closest_direction = None
-            closest_distance = None
+        # --------------------------------------------------
+        # RETURN
+        # --------------------------------------------------
 
         return {
             "status": "scan_saved",
             "scan_ok": True,
-            "total_points": total_points,
-            "file_path": filename,
 
-            "zones": zone_summary,
+            "navigation_points":
+                total_points,
 
-            "clear_zones": clear_zones,
-            "caution_zones": caution_zones,
-            "blocked_zones": blocked_zones,
+            "file_path":
+                filename,
 
-            "clearest_direction": clearest_direction,
-
-            "closest_obstacle_direction":
-                closest_direction,
-
-            "closest_obstacle_meters":
-                closest_distance
+            "zones":
+                zone_summary
         }
 
     def add_tool_result(self, tool_call_id, result):
