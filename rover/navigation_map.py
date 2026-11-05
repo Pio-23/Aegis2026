@@ -758,8 +758,8 @@ class NavigationMap:
             ax.scatter(
                 map_x,
                 map_y,
-                s=2,
-                alpha=0.6,
+                s=3,
+                alpha=0.35,
                 label="Mapped LiDAR geometry"
             )
 

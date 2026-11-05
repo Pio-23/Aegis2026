@@ -1,5 +1,6 @@
 import os
 import time
+import json
 
 import numpy as np
 
@@ -16,7 +17,7 @@ import matplotlib.pyplot as plt
 # The real cloud stays FULL resolution.
 #
 # This limit applies ONLY to PNG rendering for Luna.
-MAX_VIS_POINTS = 150_000
+MAX_VIS_POINTS = 300_000
 
 # Navigation height range.
 MIN_NAV_Z = -0.27
@@ -32,7 +33,27 @@ MAX_NAV_Z = 1.00
 CORRIDOR_HALF_WIDTH_M = 0.45
 
 # Luna images do not need print-quality resolution.
-IMAGE_DPI = 110
+IMAGE_DPI = 140
+
+# ----------------------------------------------------------
+# DIRECT LIDAR MEASUREMENT SETTINGS
+# ----------------------------------------------------------
+
+# 360 degrees / 10 degrees = 36 angular bins.
+#
+# These bins do NOT classify directions as blocked or clear.
+# They only preserve measured point density by angle/range
+# for the AI to interpret itself.
+ANGULAR_BIN_DEG = 10
+
+# Distance histogram resolution.
+RANGE_BIN_WIDTH_M = 0.50
+
+# Distances beyond this are still counted separately.
+# This keeps the JSON compact while preserving the fact
+# that farther returns exist.
+RANGE_HISTOGRAM_MAX_M = 20.0
+
 
 
 def _downsample_xyz(
@@ -67,6 +88,204 @@ def _downsample_xyz(
         y[indices],
         z[indices]
     )
+
+def _create_angular_measurements(
+    x,
+    y,
+    output_file
+):
+    """
+    Create direct 10-degree LiDAR range measurements.
+
+    This function does NOT decide:
+        - blocked / clear
+        - safe / unsafe
+        - best direction
+        - obstacle distance
+
+    It only groups actual LiDAR returns by:
+
+        angle
+        distance
+
+    and reports how many measured points fall into each
+    angular/range cell.
+
+    Coordinate convention:
+
+        0 deg   = FRONT
+        +90 deg = LEFT
+        -90 deg = RIGHT
+        180 deg = BACK
+    """
+
+    distances = np.hypot(
+        x,
+        y
+    )
+
+    angles_deg = np.degrees(
+        np.arctan2(
+            y,
+            x
+        )
+    )
+
+    valid = (
+        np.isfinite(distances)
+        & np.isfinite(angles_deg)
+        & (distances > 0.001)
+    )
+
+    distances = distances[valid]
+    angles_deg = angles_deg[valid]
+
+    # Round each point to its nearest 10-degree direction.
+    angle_centers = (
+        np.rint(
+            angles_deg / ANGULAR_BIN_DEG
+        )
+        * ANGULAR_BIN_DEG
+    ).astype(int)
+
+    # +180 and -180 represent the same BACK direction.
+    angle_centers[
+        angle_centers == -180
+    ] = 180
+
+    centers = list(
+        range(
+            -170,
+            181,
+            ANGULAR_BIN_DEG
+        )
+    )
+
+    distance_edges = np.arange(
+        0.0,
+        RANGE_HISTOGRAM_MAX_M
+        + RANGE_BIN_WIDTH_M,
+        RANGE_BIN_WIDTH_M
+    )
+
+    angular_bins = []
+
+    for center in centers:
+
+        mask = (
+            angle_centers == center
+        )
+
+        sector_distances = (
+            distances[mask]
+        )
+
+        in_range = (
+            sector_distances[
+                sector_distances
+                < RANGE_HISTOGRAM_MAX_M
+            ]
+        )
+
+        histogram, _ = np.histogram(
+            in_range,
+            bins=distance_edges
+        )
+
+        distance_counts = {}
+
+        for i, count in enumerate(
+            histogram
+        ):
+
+            start_m = (
+                distance_edges[i]
+            )
+
+            end_m = (
+                distance_edges[i + 1]
+            )
+
+            label = (
+                f"{start_m:.1f}-"
+                f"{end_m:.1f}"
+            )
+
+            distance_counts[label] = int(
+                count
+            )
+
+        beyond_max = int(
+            np.count_nonzero(
+                sector_distances
+                >= RANGE_HISTOGRAM_MAX_M
+            )
+        )
+
+        angular_bins.append({
+            "angle_center_deg":
+                int(center),
+
+            "point_count":
+                int(
+                    len(
+                        sector_distances
+                    )
+                ),
+
+            "distance_point_counts":
+                distance_counts,
+
+            "points_beyond_20m":
+                beyond_max
+        })
+
+    data = {
+        "coordinate_system": {
+            "0_deg": "FRONT",
+            "positive_angles": "LEFT",
+            "negative_angles": "RIGHT",
+            "180_deg": "BACK"
+        },
+
+        "angular_bin_width_deg":
+            ANGULAR_BIN_DEG,
+
+        "distance_bin_width_m":
+            RANGE_BIN_WIDTH_M,
+
+        "distance_histogram_max_m":
+            RANGE_HISTOGRAM_MAX_M,
+
+        "total_points":
+            int(
+                len(
+                    distances
+                )
+            ),
+
+        "angular_bins":
+            angular_bins
+    }
+
+    with open(
+        output_file,
+        "w"
+    ) as f:
+
+        json.dump(
+            data,
+            f,
+            separators=(",", ":")
+        )
+
+    print(
+        "[LIDAR DIRECT] "
+        f"10-degree measurements saved: "
+        f"{output_file}"
+    )
+
+    return output_file
 
 
 def create_lidar_visualizations(
@@ -210,8 +429,8 @@ def create_lidar_visualizations(
     ax.scatter(
         vis_y,
         vis_x,
-        s=0.35,
-        alpha=0.55
+        s=0.22,
+        alpha=0.70
     )
 
     ax.scatter(
@@ -268,48 +487,130 @@ def create_lidar_visualizations(
     )
 
 
+        # ======================================================
+    # 2. DIRECT POLAR / RANGE VIEW
     # ======================================================
-    # 2. CENTER-CORRIDOR XZ SLICE
+
+    (
+        polar_x,
+        polar_y,
+        polar_z
+    ) = _downsample_xyz(
+        nav_x,
+        nav_y,
+        nav_z
+    )
+
+    polar_angles = np.arctan2(
+        polar_y,
+        polar_x
+    )
+
+    polar_ranges = np.hypot(
+        polar_x,
+        polar_y
+    )
+
+    polar_file = os.path.join(
+        output_dir,
+        f"lidar_polar_range_{timestamp}.png"
+    )
+
+    fig = plt.figure(
+        figsize=(9, 9)
+    )
+
+    ax = fig.add_subplot(
+        111,
+        projection="polar"
+    )
+
+    # FRONT is visually at the top.
+    ax.set_theta_zero_location(
+        "N"
+    )
+
+    # Positive angle = LEFT.
+    ax.set_theta_direction(
+        1
+    )
+
+    ax.scatter(
+        polar_angles,
+        polar_ranges,
+        s=0.25,
+        alpha=0.70
+    )
+
+    ax.set_title(
+        "AEGIS LiDAR - Direct Polar Range View\n"
+        "0° = FRONT | +90° = LEFT | "
+        "-90° = RIGHT | 180° = BACK"
+    )
+
+    ax.grid(True)
+
+    fig.savefig(
+        polar_file,
+        dpi=IMAGE_DPI
+    )
+
+    plt.close(fig)
+
+    files[
+        "polar_range"
+    ] = polar_file
+
+    print(
+        "[LIDAR VIS] Polar range saved: "
+        f"{polar_file}"
+    )
+
+
+    # ======================================================
+    # 3. DIRECT 10-DEGREE RANGE MEASUREMENTS
+    # ======================================================
+
+    angular_file = os.path.join(
+        output_dir,
+        f"lidar_angular_10deg_{timestamp}.json"
+    )
+
+    _create_angular_measurements(
+        x=nav_x,
+        y=nav_y,
+        output_file=angular_file
+    )
+
+    files[
+        "angular_measurements"
+    ] = angular_file
+
+    # ======================================================
+    # LEFT SIDE
     # ======================================================
 
     # Do NOT collapse the entire room into X/Z.
     #
     # Only show geometry physically near the
     # rover's center travel corridor.
-    corridor_mask = (
-        np.abs(y)
-        <= CORRIDOR_HALF_WIDTH_M
+    
+    left_corridor_mask = (
+        (y >= 0.0)
+        & (y <= CORRIDOR_HALF_WIDTH_M)
     )
 
-    corridor_x = x[
-        corridor_mask
-    ]
+    left_x = x[left_corridor_mask]
+    left_y = y[left_corridor_mask]
+    left_z = z[left_corridor_mask]
 
-    corridor_y = y[
-        corridor_mask
-    ]
+    left_full_count = len(left_x)
 
-    corridor_z = z[
-        corridor_mask
-    ]
+    ( left_vis_x, left_vis_y, left_vis_z) = _downsample_xyz( left_x, left_y, left_z)
 
-    corridor_full_count = len(
-        corridor_x
-    )
-
-    (
-        slice_x,
-        slice_y,
-        slice_z
-    ) = _downsample_xyz(
-        corridor_x,
-        corridor_y,
-        corridor_z
-    )
-
-    corridor_file = os.path.join(
+    left_file = os.path.join(
         output_dir,
-        f"lidar_corridor_xz_{timestamp}.png"
+        f"lidar_left_corridor_xz_{timestamp}.png"
     )
 
     fig, ax = plt.subplots(
@@ -317,10 +618,10 @@ def create_lidar_visualizations(
     )
 
     ax.scatter(
-        slice_x,
-        slice_z,
-        s=0.4,
-        alpha=0.6
+        left_vis_x,
+        left_vis_z,
+        s=0.35,
+        alpha=0.65
     )
 
     ax.scatter(
@@ -340,10 +641,10 @@ def create_lidar_visualizations(
     )
 
     ax.set_title(
-        "AEGIS LiDAR - Center Travel Corridor\n"
-        f"|Y| <= {CORRIDOR_HALF_WIDTH_M:.2f} m | "
-        f"{corridor_full_count:,} points | "
-        f"{len(slice_x):,} rendered"
+        "AEGIS LiDAR - LEFT Travel Corridor\n"
+        f"0 <= Y <= {CORRIDOR_HALF_WIDTH_M:.2f} m | "
+        f"{left_full_count:,} points | "
+        f"{len(left_vis_x):,} rendered"
     )
 
     ax.grid(True)
@@ -353,20 +654,98 @@ def create_lidar_visualizations(
     )
 
     fig.savefig(
-        corridor_file,
+        left_file,
         dpi=IMAGE_DPI
     )
 
     plt.close(fig)
 
     files[
-        "corridor_xz"
-    ] = corridor_file
+        "left_corridor_xz"
+    ] = left_file
 
-    print(
-        "[LIDAR VIS] Corridor XZ saved: "
-        f"{corridor_file}"
+
+    
+    # ======================================================
+    # RIGHT SIDE
+    # ======================================================
+
+    right_corridor_mask = (
+        (y <= 0.0)
+        & (y >= -CORRIDOR_HALF_WIDTH_M)
     )
+
+    right_x = x[right_corridor_mask]
+    right_y = y[right_corridor_mask]
+    right_z = z[right_corridor_mask]
+
+    right_full_count = len(right_x)
+
+    (
+        right_vis_x,
+        right_vis_y,
+        right_vis_z
+    ) = _downsample_xyz(
+        right_x,
+        right_y,
+        right_z
+    )
+
+    right_file = os.path.join(
+        output_dir,
+        f"lidar_right_corridor_xz_{timestamp}.png"
+    )
+
+    fig, ax = plt.subplots(
+        figsize=(11, 7)
+    )
+
+    ax.scatter(
+        right_vis_x,
+        right_vis_z,
+        s=0.35,
+        alpha=0.65
+    )
+
+    ax.scatter(
+        [0],
+        [0],
+        s=100,
+        marker="^",
+        label="AEGIS Rover"
+    )
+
+    ax.set_xlabel(
+        "X (m)   +X = FRONT"
+    )
+
+    ax.set_ylabel(
+        "Z (m)   +Z = UP"
+    )
+
+    ax.set_title(
+        "AEGIS LiDAR - RIGHT Travel Corridor\n"
+        f"-{CORRIDOR_HALF_WIDTH_M:.2f} <= Y <= 0 m | "
+        f"{right_full_count:,} points | "
+        f"{len(right_vis_x):,} rendered"
+    )
+
+    ax.grid(True)
+
+    ax.legend(
+        loc="upper right"
+    )
+
+    fig.savefig(
+        right_file,
+        dpi=IMAGE_DPI
+    )
+
+    plt.close(fig)
+
+    files[
+        "right_corridor_xz"
+    ] = right_file
 
 
     # ======================================================
@@ -457,6 +836,8 @@ def create_lidar_visualizations(
             "[LIDAR VIS] 3D debug saved: "
             f"{debug_file}"
         )
+
+
 
 
     # ======================================================

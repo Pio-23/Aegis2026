@@ -11,6 +11,8 @@ import openai
 
 from rover.navigation_map import NavigationMap
 
+DEBUG_LIDAR_INTERPRETATION = True
+
 
 class Autopilot:
 
@@ -67,9 +69,11 @@ class Autopilot:
 
     Navigation decisions may include:
 
-    - LiDAR directional distance estimates
-    - LiDAR NAVIGATION_XY top-down image
-    - LiDAR CORRIDOR_XZ center travel-corridor image
+    - a direct sampled raw STL27L point-cloud input
+    - direct LiDAR top-down navigation geometry
+    - direct LiDAR polar/range geometry
+    - direct 10-degree LiDAR angle/range point measurements
+    - left and right LiDAR travel-corridor views
     - fresh camera images
     - ultrasonic readings
     - IMU / heading information
@@ -77,81 +81,118 @@ class Autopilot:
     - persistent navigation map
     - current estimated rover pose
     - previous LiDAR scan locations and headings
+    - measured encoder odometry when available
 
     Use these sources together.
 
     Do not treat any single source as a complete representation of the
     environment.
 
+    Different sensor inputs provide different forms of evidence. Use their
+    strengths together before choosing a physical movement.
+
 
     ============================================================
-    LIDAR MEASUREMENT SUMMARY
+    LIDAR GEOMETRY
     ============================================================
 
-    The LiDAR summary currently provides one supporting distance estimate
-    for each of eight broad directional sectors:
+    The raw STL27L point cloud is the source of truth for LiDAR geometric
+    measurements.
 
-    - front
-    - front_left
-    - left
-    - back_left
-    - back
-    - back_right
-    - right
-    - front_right
+    The rover provides several direct representations derived from the same
+    LiDAR scan:
 
-    Each sector contains:
+    - a sampled subset of direct raw X Y Z INTENSITY measurements
+    - a top-down navigation-height point-cloud view
+    - a polar/range point-cloud view
+    - 10-degree angular measurement bins containing point counts by distance
+    - a left travel-corridor XZ view
+    - a right travel-corridor XZ view
 
-    obstacle_distance_m
+    The raw sampled point input normally contains approximately 16,800 actual
+    measured LiDAR points distributed across the full scan.
 
-    IMPORTANT:
+    Each raw point contains:
 
-    obstacle_distance_m is a supporting LiDAR estimate only.
+    X Y Z INTENSITY
 
-    It is calculated from geometry inside a broad directional sector and
-    does NOT necessarily represent the distance that the rover can travel
-    through the center of that direction.
+    X, Y, and Z are Cartesian coordinates in meters.
 
-    A nearby chair leg, table leg, wall edge, or other object near one side
-    of a sector may make obstacle_distance_m appear much shorter than the
-    actual open travel corridor.
+    INTENSITY is LiDAR return intensity and is NOT another spatial coordinate.
 
-    Therefore:
+    The sampled raw points are supporting direct sensor evidence. They do not
+    replace the full-scan LiDAR representations.
 
-    - Do NOT treat obstacle_distance_m as an automatic blocked/clear result.
-    - Do NOT simply choose the direction with the largest number.
-    - Do NOT assume the number represents exact center-corridor clearance.
+    Python does NOT decide which direction is blocked, clear, safe, unsafe,
+    or preferable.
 
-    Use the NAVIGATION_XY image as the primary LiDAR representation for
-    horizontal path geometry.
+    Python may organize measured LiDAR points by angle, distance, height, or
+    visualization format so that the geometry can be interpreted efficiently.
 
-    Use CORRIDOR_XZ to inspect geometry inside the rover's center travel
-    corridor.
+    These transformations are measurements and representations, not navigation
+    conclusions.
 
-    Combine these with:
+    Interpret the measured geometry yourself.
 
-    - camera imagery
+    The 10-degree measurements describe how many actual LiDAR returns were
+    observed at different horizontal ranges inside each 10-degree angular
+    region.
+
+    They do NOT contain a Python-selected best direction.
+
+    Use neighboring angular regions together.
+
+    Do not choose or reject a path because of one isolated close point or one
+    isolated distant point.
+
+    Instead determine whether the combined LiDAR evidence indicates:
+
+    - substantial geometry
+    - isolated objects
+    - continuous walls or structures
+    - continuous open angular regions
+    - openings
+    - rover-sized travel corridors
+    - geometry beside a path rather than inside it
+    - geometry occupying the rover's actual travel height and width
+
+    Compare the raw sampled measurements, point-density distributions,
+    neighboring 10-degree measurements, top-down geometry, polar/range view,
+    and travel-corridor views.
+
+    Then cross-check that interpretation with:
+
+    - fresh camera imagery
     - ultrasonic readings
-    - persistent navigation map
     - current heading
+    - persistent navigation map
     - recent movement history
+    - encoder odometry when available
 
-    The directional distance summary is currently supporting information,
-    not authoritative path-clearance information.
+    Ultrasonic sensors remain the primary immediate near-field collision
+    measurement.
 
+    If a fresh LiDAR scan has already been obtained from the current pose and the
+    rover has not materially changed its position or viewpoint, do NOT request
+    another LiDAR scan simply because the same obstacle remains present.
+
+    Repeated measurements of the same static geometry do not provide useful new
+    navigation information.
+
+    Use the fresh scan to choose a movement, escape maneuver, or NO_OP if every
+    movement is genuinely unsafe.
 
     ============================================================
-    LIDAR IMAGES
+    LIDAR REPRESENTATIONS
     ============================================================
-
-    A LiDAR scan normally provides two navigation-focused images.
 
     NAVIGATION_XY:
 
-    This is the primary LiDAR navigation image.
+    This is the main top-down LiDAR navigation view.
 
-    It is a top-down X/Y representation with floor and high geometry
-    removed.
+    It contains measured LiDAR geometry within the navigation-relevant height
+    range so that floor and geometry too high to affect normal rover travel do
+    not dominate the navigation view.
 
     Use it to understand:
 
@@ -171,35 +212,103 @@ class Autopilot:
 
     The rover is at the origin.
 
-    A close object beside a path does not necessarily block the center
+    A close object beside a path does not necessarily block the rover's actual
     travel corridor.
 
 
-    CORRIDOR_XZ:
+    POLAR_RANGE:
 
-    This is a vertical slice through the rover's center travel corridor.
+    This is a direct angle-versus-horizontal-distance representation of
+    measured LiDAR returns.
 
-    Unlike a normal XZ projection, it does NOT combine geometry from the
-    entire left/right width of the room.
+    0 degrees = FRONT
+    positive angles = LEFT
+    negative angles = RIGHT
+    180 degrees = BACK
 
-    Use it to understand whether vertical geometry actually occupies the
-    space through which the rover body would travel.
+    Radial distance represents horizontal distance from the rover.
 
-    This can help identify:
+    Use this view together with the 10-degree measurements to understand how
+    geometry is distributed by direction and range.
 
-    - furniture directly in the travel corridor
+    Do not interpret one isolated return as an entire blocked direction.
+
+    Examine continuous structures and distributions across neighboring angles.
+
+
+    10-DEGREE LIDAR MEASUREMENTS:
+
+    The complete 360-degree navigation cloud is divided into 10-degree angular
+    regions.
+
+    For each region, the rover provides measured point counts across distance
+    ranges.
+
+    These values are direct organized measurements, not a blocked/clear
+    classification.
+
+    Use them especially when comparing small directional differences such as:
+
+    - straight ahead
+    - slightly left of forward
+    - slightly right of forward
+
+    Prefer broad, consistent geometric evidence across neighboring bins rather
+    than one unusually close or unusually distant return.
+
+
+    LEFT_CORRIDOR_XZ:
+
+    This view contains vertical LiDAR geometry through the LEFT half of the
+    rover's center travel corridor.
+
+    Use it to determine whether measured geometry occupies the vertical space
+    the left portion of the rover body would need while moving forward.
+
+
+    RIGHT_CORRIDOR_XZ:
+
+    This view contains vertical LiDAR geometry through the RIGHT half of the
+    rover's center travel corridor.
+
+    Use it to determine whether measured geometry occupies the vertical space
+    the right portion of the rover body would need while moving forward.
+
+
+    The LEFT and RIGHT corridor views can help identify:
+
+    - furniture inside the travel corridor
     - low structures
     - table or chair geometry
     - vertical obstacles
-    - overhead geometry
-    - open vertical space
+    - overhangs
+    - open vertical travel space
+    - an obstacle affecting only one side of the rover's path
 
 
-    LiDAR images represent the environment from the pose at which the scan
-    was captured.
+    RAW LIDAR POINT SAMPLE:
 
-    After movement they remain useful structural memory, but they are not
-    exact current-distance measurements.
+    A sampled subset of approximately 16,800 direct raw STL27L measurements may
+    also be provided.
+
+    Use these raw points as independent geometric evidence.
+
+    The raw sample is useful for checking whether conclusions from the organized
+    LiDAR representations are supported by actual measured point geometry.
+
+    Do not assume that the raw sample alone perfectly represents every detail of
+    the full scan.
+
+    When the raw sample and the full-scan representations disagree on a small
+    directional preference, use the full-scan top-down, polar/range, 10-degree
+    measurements, corridor views, camera, and other sensors to resolve the
+    uncertainty.
+
+    LiDAR representations describe the environment from the pose at which the
+    scan was captured.
+
+    After movement, an older LiDAR scan remains useful structural memory but is
+    not an exact current-distance measurement.
 
 
     ============================================================
@@ -242,22 +351,41 @@ class Autopilot:
     ULTRASONIC SENSORS
     ============================================================
 
-    Ultrasonic sensors provide fresh near-field collision information.
+    - Ultrasonic readings provide fresh near-field collision information.
 
-    They are particularly important for immediate movement safety.
+    - The physical FRONT CENTER ultrasonic sensor is currently unreliable and may
+    report 0 or invalid values.
 
-    During movement, the rover's movement controller continuously checks
-    ultrasonic distance and may stop movement early.
+    - IGNORE front_center_cm for navigation decisions until further notice.
 
-    Therefore:
+    - Use lidar_mount_cm as the rover's effective FRONT CENTER proximity reading.
+    The LiDAR-mounted ultrasonic faces approximately the same forward direction
+    as the normal center sensor, but is mounted slightly higher.
 
-    - use ultrasonics for immediate collision danger
-    - use LiDAR for broader geometry
-    - use camera for current visual interpretation
-    - use the map for persistent spatial memory
+    - Therefore interpret the ultrasonic sensors as:
 
-    A fresh dangerous ultrasonic measurement must not be ignored simply
-    because an older LiDAR scan or map appears open.
+        front_left_cm   = front-left proximity
+        lidar_mount_cm  = front-center proximity
+        front_right_cm  = front-right proximity
+        rear_cm         = rear proximity
+
+    - Do NOT treat front_center_cm = 0 as an obstacle, missing clearance, or a
+    reason to stop, rescan, or use no_op.
+
+    - A zero or invalid front_center_cm is an expected known sensor fault.
+
+    - For current forward-clearance decisions, use lidar_mount_cm together with
+    front_left_cm and front_right_cm.
+
+    - Because lidar_mount_cm is mounted slightly higher than the original center
+    sensor, remember that it may be less reliable for extremely low obstacles.
+    Use the camera, LiDAR geometry, and the left/right ultrasonic sensors as
+    additional confirmation.
+
+    - During movement, ultrasonic sensors continuously supervise the rover.
+
+    - Fresh ultrasonic information is more relevant for immediate collision danger
+    than old LiDAR observations.
 
 
     ============================================================
@@ -282,38 +410,94 @@ class Autopilot:
 
     Do not independently vote between sensors.
 
-    Interpret what each sensor is actually good at.
+    Interpret what each sensor and representation is actually good at.
 
-    LiDAR:
-    geometric structure
 
-    LiDAR top-down image:
-    2D spatial layout
+    Raw sampled LiDAR points:
+    direct measured geometric evidence from the latest STL27L scan
+
+
+    NAVIGATION_XY:
+    overall top-down spatial layout at navigation-relevant heights
+
+
+    POLAR_RANGE:
+    angular and horizontal-range structure around the rover
+
+
+    10-degree LiDAR measurements:
+    fine directional range and point-density evidence across the full
+    navigation cloud
+
+
+    LEFT_CORRIDOR_XZ and RIGHT_CORRIDOR_XZ:
+    vertical occupancy of the rover's actual travel corridor
+
 
     Camera:
-    current visual meaning and path interpretation
+    current visual and semantic meaning, object interpretation, and visual
+    validation of proposed paths
+
 
     Ultrasonics:
     immediate close-range collision safety
 
+
     IMU:
-    orientation and heading change
+    orientation and measured heading change
+
 
     Persistent map:
-    spatial memory and exploration history
+    spatial memory, previous scan poses, and exploration history
 
 
-    When information agrees, continue confidently.
+    Recent movement history:
+    the purpose and sequence of recent rover actions
 
-    When one LiDAR sector contains a close return but the top-down geometry,
-    camera, and ultrasonic information show a rover-sized path around it,
-    do not automatically reject the path.
 
-    When camera interpretation conflicts with strong current geometric
-    evidence, be conservative.
+    Encoder odometry when available:
+    actual measured rover displacement
 
-    When important information genuinely conflicts and safe movement cannot
-    be determined, gather additional information rather than guess.
+
+    When multiple independent measurements support the same geometric
+    interpretation, confidence may increase.
+
+    Before physical movement, cross-check the proposed travel path against the
+    most relevant available sources.
+
+    A close LiDAR return does not automatically mean an entire direction is
+    unusable.
+
+    Determine whether the return represents:
+
+    - a continuous blocking structure
+    - an isolated object
+    - geometry beside the intended path
+    - rover or sensor geometry
+    - floor or overhead geometry
+    - an object occupying only one side of the travel corridor
+
+    When the top-down geometry, polar/range view, neighboring 10-degree
+    measurements, corridor views, camera, and ultrasonics support a rover-sized
+    path, do not reject that path because of one isolated LiDAR return.
+
+    Likewise, do not trust a visually open camera path when strong current LiDAR
+    geometry or ultrasonic measurements show a real obstacle in the rover's
+    travel corridor.
+
+    Camera information does not override strong geometric collision evidence.
+
+    LiDAR information does not automatically override fresh near-field
+    ultrasonic collision evidence.
+
+    When raw sampled LiDAR points disagree slightly with the full-scan
+    representations, remember that the raw points are only a sampled subset.
+    Use the full-scan representations and the other navigation sensors to
+    resolve the disagreement.
+
+    When important information genuinely conflicts and safe movement cannot be
+    determined, gather the specific additional information needed rather than
+    guessing.
 
 
     ============================================================
@@ -323,12 +507,16 @@ class Autopilot:
     At startup:
 
     1. Obtain an initial LiDAR scan.
-    2. Examine its measurement summary.
-    3. Examine the LiDAR visualization images.
-    4. Incorporate the scan into the persistent navigation map.
-    5. Use the camera and current telemetry.
-    6. Choose ONE useful safe action.
-    7. Execute it.
+    2. Examine the direct LiDAR top-down geometry.
+    3. Examine the polar/range geometry.
+    4. Examine the 10-degree angle/range measurements.
+    5. Examine the left and right travel-corridor views.
+    6. Use the direct raw LiDAR sample as supporting measured evidence.
+    7. Incorporate the scan into the persistent navigation map.
+    8. Examine the fresh camera image and fresh telemetry.
+    9. Cross-check the proposed path with ultrasonics and current heading.
+    10. Choose ONE useful safe action.
+    11. Execute only that action.
 
     After startup, maintain continuity.
 
@@ -406,6 +594,86 @@ class Autopilot:
 
     TURN rotates approximately in place.
 
+    ============================================================
+    OBSTACLE ESCAPE BEHAVIOR
+    ============================================================
+
+    A close obstacle in one portion of the rover's forward sensing region does
+    NOT mean that all rover movement is unsafe.
+
+    If forward travel is constrained, actively evaluate alternative physical
+    actions using the available geometry and sensors.
+
+    Possible alternatives include:
+
+    - turning away from the obstacle
+    - making a smaller heading correction
+    - reversing a short distance when rear clearance is sufficient
+    - returning toward a recently known open corridor
+    - repositioning to obtain a better view of an opening
+
+    For example:
+
+    If FRONT-LEFT is very close but FRONT-RIGHT and the surrounding geometry
+    indicate open space, consider turning or repositioning toward the right.
+
+    If forward geometry is too constrained but REAR clearance is sufficient,
+    consider a short supervised reverse to create maneuvering space.
+
+    A close reading on one ultrasonic sensor should restrict movement into the
+    region measured by that sensor. It should NOT automatically prohibit every
+    possible rover movement.
+
+
+    ============================================================
+    NO_OP POLICY
+    ============================================================
+
+    NO_OP is not the default response to a static obstacle.
+
+    Do not repeatedly remain stationary simply because the current forward path
+    is blocked.
+
+    Before choosing NO_OP, evaluate whether a safe:
+
+    - reverse
+    - left turn
+    - right turn
+    - small heading correction
+    - return toward known open space
+
+    is available.
+
+    NO_OP is appropriate when:
+
+    - all immediately available physical movements appear unsafe
+    - a temporary or moving obstacle should be allowed to clear
+    - required sensor information is currently unavailable but expected shortly
+    - remaining stationary is genuinely safer than every available movement
+
+    If the obstacle is static and another safe maneuver exists, prefer the safe
+    maneuver over repeatedly choosing NO_OP.
+
+
+    ============================================================
+    ESCAPING TIGHT AREAS
+    ============================================================
+
+    When the rover reaches a tight furniture cluster or dead-end:
+
+    1. Identify which part of the rover's travel region is constrained.
+    2. Check rear clearance.
+    3. Check whether turning away from the obstacle is geometrically reasonable.
+    4. Use recent movement history to remember the direction from which the rover
+       entered the constrained area.
+    5. If necessary, reverse toward that recently known open region.
+    6. Reorient only after sufficient maneuvering clearance exists.
+
+    Do not become trapped in a repeated:
+
+        NO_OP -> NO_OP -> NO_OP
+
+    loop when a safe escape maneuver exists.
 
     ============================================================
     TURN CONTROL
@@ -464,7 +732,14 @@ class Autopilot:
 
     Do not invent your own turn timing.
 
-    The rover control system handles calibrated LEFT and RIGHT timing.
+    TURN commands are executed using BNO085 closed-loop yaw feedback.
+
+    The requested turn angle is a target. The rover measures the actual
+    completed rotation and uses the measured turn angle to update its
+    heading and persistent navigation map.
+
+    Do not assume that the requested angle and actual completed angle
+    are exactly identical.
 
 
     ============================================================
@@ -655,24 +930,57 @@ class Autopilot:
 
     When a new LiDAR scan is obtained:
 
-    1. Read the numeric distance measurements.
-    2. Examine the XY top-down image carefully.
-    3. Use the other LiDAR images for additional structural information.
-    4. Compare the geometry with the camera image.
-    5. Add the scan to the persistent navigation map.
-    6. Compare the new scan position and heading with previous map history.
-    7. Decide which actual rover-sized path is useful and safe.
+    1. Examine NAVIGATION_XY for overall navigation-height geometry.
+    2. Examine POLAR_RANGE for angular and distance structure.
+    3. Examine the 10-degree angle/range point measurements.
+    4. Compare neighboring 10-degree regions rather than isolated returns.
+    5. Examine LEFT_CORRIDOR_XZ and RIGHT_CORRIDOR_XZ for actual vertical
+       travel-corridor occupancy.
+    6. Examine the sampled raw LiDAR points as independent direct measurement
+       evidence.
+    7. Compare the LiDAR interpretation with the fresh camera image.
+    8. Cross-check immediate clearance using the fresh ultrasonic readings.
+    9. Use IMU heading to maintain the correct relationship between rover
+       orientation and observed geometry.
+    10. Incorporate the scan pose and geometry into the persistent navigation
+        map.
+    11. Compare the new observation with previous map history and recent
+        movement.
+    12. Decide which actual rover-sized path is useful and safe.
 
-    Do not simply choose whichever sector has the numerically largest
-    obstacle_distance_m.
+    Python does not provide a blocked/clear/best-direction LiDAR conclusion.
 
-    The directional distance values are broad-sector supporting estimates,
-    not exact travel-corridor clearances.
+    Determine the useful travel direction from the measured sensor evidence
+    yourself.
 
-    A very large distance behind the rover does NOT automatically make BACK
-    the preferred exploration direction.
+    For broad navigation, identify continuous open geometry.
 
-    Consider exploration progress and current intended route.
+    For fine steering decisions such as slightly left versus slightly right,
+    pay particular attention to neighboring 10-degree measurements,
+    POLAR_RANGE, and the left/right corridor views.
+
+    Use the sampled raw LiDAR points to validate geometric reasoning, but do not
+    treat the sampled subset as more complete than the full-scan
+    representations.
+
+    A large measured distance in one direction does NOT automatically make that
+    direction the preferred exploration route.
+
+    Also consider:
+
+    - rover-sized clearance
+    - current camera evidence
+    - ultrasonic safety
+    - current heading
+    - existing exploration progress
+    - persistent map history
+    - the purpose of the current route
+
+    If the available evidence agrees that a rover-sized route is safe and useful,
+    continue exploration without unnecessary rescanning.
+
+    If the evidence materially conflicts and the conflict affects movement
+    safety, obtain the specific additional observation needed before moving.
 
 
     ============================================================
@@ -924,24 +1232,26 @@ class Autopilot:
         self.navigation_state = {
             "last_lidar_time": None,
 
-            "last_lidar": {
-                "zones": {}
-            },
-
             "current_yaw_deg": None,
-            "previous_yaw_deg": None,
+            
             "yaw_at_last_lidar_deg": None,
             "heading_change_since_lidar_deg": 0.0,
 
             "recent_movements": [],
-            "movement_segments_since_lidar": 0,
-
-            "exploration_heading": None
+           
+           "defer_next_scan_after_turn": False,
+           
         }
 
         self.navigation_map = NavigationMap()
         self.navigation_map_file = None
 
+        # Latest direct raw LiDAR sample sent to Luna.
+        #
+        # Only ONE raw sample is kept in model memory because each
+        # ~16.8k-point sample uses roughly 400k input tokens.
+        self.latest_raw_lidar_message = None
+        
         # Connect API account to client
         self.client = openai.OpenAI(
         api_key=os.getenv("OPENAI_API_KEY")
@@ -951,81 +1261,94 @@ class Autopilot:
         with open(filename, "rb") as image_file:
             return base64.b64encode(image_file.read()).decode("utf-8")
 
-    def add_lidar_visualizations(self, lidar_views):
+    
+    def debug_lidar_interpretation(
+        self,
+        lidar_views
+    ):
         """
-        Send navigation-focused LiDAR images to Luna.
+        Development-only diagnostic.
 
-        Normal autonomous navigation uses:
+        Ask Luna to interpret only the latest direct LiDAR
+        geometry images.
 
-            navigation_xy
-                Height-filtered top-down geometry.
+        This diagnostic intentionally does NOT use:
 
-            corridor_xz
-                Vertical geometry only through the rover's
-                center travel corridor.
+            camera
+            ultrasonics
+            persistent map
+            movement history
+            raw 16.8k XYZ sample
 
-        A 3D image may exist during manual debug runs, but
-        is not required for normal Luna navigation.
+        The main autopilot receives all of those separately.
         """
 
-        if not isinstance(lidar_views, dict) or not lidar_views:
-
-            print(
-                "[AI] No LiDAR visualizations available."
-            )
-
+        if not isinstance(
+            lidar_views,
+            dict
+        ):
             return
+
+        view_order = [
+            "navigation_xy",
+            "polar_range",
+            "left_corridor_xz",
+            "right_corridor_xz"
+        ]
+
+        view_labels = {
+            "navigation_xy":
+                (
+                    "NAVIGATION_XY - top-down "
+                    "navigation-height LiDAR geometry"
+                ),
+
+            "polar_range":
+                (
+                    "POLAR_RANGE - direct angle versus "
+                    "horizontal-distance LiDAR view"
+                ),
+
+            "left_corridor_xz":
+                (
+                    "LEFT_CORRIDOR_XZ - vertical geometry "
+                    "through the left half of the travel corridor"
+                ),
+
+            "right_corridor_xz":
+                (
+                    "RIGHT_CORRIDOR_XZ - vertical geometry "
+                    "through the right half of the travel corridor"
+                )
+        }
 
         content = [
             {
                 "type": "text",
                 "text": (
-                    "These are navigation-focused visualizations "
-                    "of the latest AEGIS LiDAR scan.\n\n"
+                    "Analyze ONLY these LiDAR geometry images.\n\n"
 
                     "Coordinate system:\n"
                     "+X = FRONT\n"
+                    "-X = BACK\n"
                     "+Y = LEFT\n"
-                    "+Z = UP\n"
+                    "-Y = RIGHT\n"
+                    "+Z = UP\n\n"
+
                     "The rover is at the origin.\n\n"
 
-                    "NAVIGATION_XY:\n"
-                    "This is the main top-down navigation view. "
-                    "Floor and high geometry have been removed. "
-                    "Use it to understand walls, obstacles, openings, "
-                    "corridors, corners, and rover-sized paths.\n\n"
+                    "Do not use camera data, ultrasonics, "
+                    "persistent-map history, or previous "
+                    "conversation information.\n\n"
 
-                    "CORRIDOR_XZ:\n"
-                    "This is NOT the entire room collapsed into a side "
-                    "view. It contains only geometry near the rover's "
-                    "center travel corridor. Use it to determine whether "
-                    "objects, overhangs, furniture, or other geometry "
-                    "occupy the vertical space through which the rover "
-                    "would actually travel.\n\n"
+                    "Describe the measured geometry, nearby "
+                    "structures, broad openings, rover-sized "
+                    "travel corridors, and uncertainty.\n\n"
 
-                    "Directional obstacle_distance_m values are supporting "
-                    "distance measurements only. A close return somewhere "
-                    "inside a broad sector does not automatically mean the "
-                    "actual rover travel corridor is blocked.\n\n"
-
-                    "Use these images together with the camera, ultrasonic "
-                    "sensors, persistent navigation map, current heading, "
-                    "and recent movement history."
+                    "Do not classify an entire direction from "
+                    "one isolated point."
                 )
             }
-        ]
-
-        view_labels = {
-            "navigation_xy":
-                "NAVIGATION_XY - TOP-DOWN NAVIGATION VIEW",
-
-            "corridor_xz":
-                "CORRIDOR_XZ - CENTER TRAVEL-CORRIDOR SLICE"
-        }
-
-        view_order = [
-            "navigation_xy",
-            "corridor_xz"
         ]
 
         images_added = 0
@@ -1036,20 +1359,18 @@ class Autopilot:
                 view_name
             )
 
-            if not filename:
+            if (
+                not filename
+                or not os.path.exists(
+                    filename
+                )
+            ):
+
                 print(
-                    f"[AI] LiDAR view missing: "
+                    "[LIDAR LUNA DEBUG] Missing view: "
                     f"{view_name}"
                 )
-                continue
 
-            if not os.path.exists(
-                filename
-            ):
-                print(
-                    "[AI] LiDAR visualization "
-                    f"file not found: {filename}"
-                )
                 continue
 
             image_base64 = self.encode_image(
@@ -1059,11 +1380,14 @@ class Autopilot:
             content.append({
                 "type": "text",
                 "text":
-                    view_labels[view_name]
+                    view_labels[
+                        view_name
+                    ]
             })
 
             content.append({
                 "type": "image_url",
+
                 "image_url": {
                     "url":
                         "data:image/png;base64,"
@@ -1076,11 +1400,576 @@ class Autopilot:
 
             images_added += 1
 
+
         if images_added == 0:
 
             print(
-                "[AI] No LiDAR visualization "
-                "images could be loaded."
+                "[LIDAR LUNA DEBUG] "
+                "No LiDAR images available."
+            )
+
+            return
+
+
+        debug_messages = [
+            {
+                "role": "system",
+
+                "content": (
+                    "You are inspecting AEGIS rover "
+                    "LiDAR geometry for development "
+                    "debugging. Analyze only the supplied "
+                    "LiDAR measurements."
+                )
+            },
+            {
+                "role": "user",
+                "content": content
+            }
+        ]
+
+
+        try:
+
+            response = (
+                self.client
+                .chat.completions
+                .create(
+                    model=self.model_name,
+                    messages=debug_messages,
+                    reasoning_effort="none"
+                )
+            )
+
+            interpretation = (
+                response
+                .choices[0]
+                .message
+                .content
+            )
+
+            print()
+            print("=" * 60)
+
+            print(
+                "[LIDAR LUNA DEBUG - "
+                "DIRECT GEOMETRY ONLY]"
+            )
+
+            print("=" * 60)
+
+            print(
+                interpretation
+                if interpretation
+                else "No interpretation returned."
+            )
+
+            print("=" * 60)
+            print()
+
+
+        except Exception as e:
+
+            print(
+                "[LIDAR LUNA DEBUG] "
+                f"Analysis failed: {e}"
+            )
+
+
+    def create_raw_lidar_ai_sample(
+        self,
+        lidar_filename,
+        stride=64
+    ):
+        """
+        Create a uniformly sampled raw LiDAR file for Luna.
+
+        The original full-resolution cloud is NOT modified.
+
+        Every 64th measured point is retained.
+
+        Current cloud format:
+
+            X Y Z INTENSITY
+
+        This produces approximately 16.8k points from the
+        current ~1.07 million-point / 400-ring scan.
+
+        This is direct sensor data. No blocked/clear/best-path
+        interpretation is performed here.
+        """
+
+        if (
+            not lidar_filename
+            or not os.path.exists(
+                lidar_filename
+            )
+        ):
+            return None
+
+        output_dir = os.path.dirname(
+            lidar_filename
+        )
+
+        timestamp = time.strftime(
+            "%Y%m%d_%H%M%S"
+        )
+
+        output_file = os.path.join(
+            output_dir,
+            f"lidar_raw_ai_sample_{timestamp}.txt"
+        )
+
+        source_points = 0
+        sampled_points = 0
+
+        with open(
+            lidar_filename,
+            "r"
+        ) as source:
+
+            with open(
+                output_file,
+                "w"
+            ) as destination:
+
+                for line_number, line in enumerate(
+                    source
+                ):
+
+                    source_points += 1
+
+                    if (
+                        line_number % stride
+                        != 0
+                    ):
+                        continue
+
+                    values = line.split()
+
+                    # Current STL27L converted cloud:
+                    #
+                    # X Y Z INTENSITY
+                    if len(values) < 4:
+                        continue
+
+                    destination.write(
+                        line
+                    )
+
+                    sampled_points += 1
+
+        print(
+            "[AI] Raw LiDAR sample created: "
+            f"{sampled_points:,} / "
+            f"{source_points:,} points"
+        )
+
+        print(
+            "[AI] Raw LiDAR sample file: "
+            f"{output_file}"
+        )
+
+        return output_file
+
+    def add_raw_lidar_sample_to_memory(
+        self,
+        filename
+    ):
+        """
+        Send the latest sampled raw STL27L point cloud to Luna.
+
+        Only the newest raw sample is retained in model memory.
+
+        Current point format:
+
+            X Y Z INTENSITY
+
+        X/Y/Z are Cartesian coordinates in meters.
+        INTENSITY is LiDAR return intensity.
+
+        No navigation classification is performed here.
+        """
+
+        if (
+            not filename
+            or not os.path.exists(filename)
+        ):
+
+            print(
+                "[AI] Raw LiDAR sample unavailable."
+            )
+
+            return
+
+        # --------------------------------------------------
+        # REMOVE PREVIOUS RAW LIDAR SAMPLE FROM MEMORY
+        # --------------------------------------------------
+
+        if (
+            self.latest_raw_lidar_message
+            is not None
+        ):
+
+            old_message = (
+                self.latest_raw_lidar_message
+            )
+
+            self.memory = [
+                msg
+                for msg in self.memory
+                if msg is not old_message
+            ]
+
+            self.latest_raw_lidar_message = None
+
+            print(
+                "[AI] Removed previous raw LiDAR "
+                "sample from model memory."
+            )
+
+        # --------------------------------------------------
+        # READ NEW DIRECT RAW SAMPLE
+        # --------------------------------------------------
+
+        try:
+
+            with open(
+                filename,
+                "r"
+            ) as f:
+
+                raw_points = f.read()
+
+        except Exception as e:
+
+            print(
+                "[AI] Failed to read raw LiDAR "
+                f"sample: {e}"
+            )
+
+            return
+
+        point_count = (
+            raw_points.count("\n")
+        )
+
+        if (
+            raw_points
+            and not raw_points.endswith("\n")
+        ):
+
+            point_count += 1
+
+        # --------------------------------------------------
+        # BUILD MODEL MESSAGE
+        # --------------------------------------------------
+
+        message = {
+            "role": "user",
+
+            "content": (
+                "DIRECT RAW LIDAR POINT SAMPLE\n\n"
+
+                "This is a uniformly sampled subset of the "
+                "latest STL27L point cloud.\n\n"
+
+                "The full-resolution cloud remains stored "
+                "locally. These points are direct sensor "
+                "measurements and have NOT been classified "
+                "as blocked, clear, safe, unsafe, or "
+                "preferable by Python.\n\n"
+
+                "Each line contains:\n\n"
+
+                "X Y Z INTENSITY\n\n"
+
+                "X, Y, and Z are Cartesian coordinates "
+                "in meters.\n"
+
+                "INTENSITY is LiDAR return intensity and "
+                "is NOT another spatial coordinate.\n\n"
+
+                "Coordinate system:\n"
+                "+X = FRONT\n"
+                "-X = BACK\n"
+                "+Y = LEFT\n"
+                "-Y = RIGHT\n"
+                "+Z = UP\n\n"
+
+                f"Sampled points: {point_count:,}\n\n"
+
+                "Use these raw measurements together with "
+                "the full-cloud LiDAR images, 10-degree "
+                "measurements, camera, ultrasonics, IMU, "
+                "persistent map, and movement history.\n\n"
+
+                "RAW POINTS START BELOW:\n"
+                "----------------------------------------\n"
+
+                + raw_points
+            )
+        }
+
+        self.update_memory(
+            message
+        )
+
+        self.latest_raw_lidar_message = (
+            message
+        )
+
+        print(
+            "[AI] Added latest raw LiDAR sample "
+            f"to model memory: {point_count:,} points"
+        )
+
+
+    def add_lidar_visualizations(
+        self,
+        lidar_views
+    ):
+        """
+        Send direct LiDAR geometry representations to Luna.
+
+        These are measurement representations only.
+
+        Python does NOT decide:
+
+            blocked
+            clear
+            safe
+            unsafe
+            best direction
+        """
+
+        if (
+            not isinstance(
+                lidar_views,
+                dict
+            )
+            or not lidar_views
+        ):
+
+            print(
+                "[AI] No LiDAR inputs available."
+            )
+
+            return
+
+        content = [
+            {
+                "type": "text",
+
+                "text": (
+                    "DIRECT LIDAR GEOMETRY INPUTS\n\n"
+
+                    "These inputs come from the latest "
+                    "AEGIS STL27L scan.\n\n"
+
+                    "Coordinate system:\n"
+                    "+X = FRONT\n"
+                    "-X = BACK\n"
+                    "+Y = LEFT\n"
+                    "-Y = RIGHT\n"
+                    "+Z = UP\n\n"
+
+                    "The rover is at the origin.\n\n"
+
+                    "Python has NOT classified any "
+                    "direction as blocked, clear, safe, "
+                    "unsafe, or preferable.\n\n"
+
+                    "Interpret the measured geometry "
+                    "yourself and cross-check it with "
+                    "the camera, ultrasonics, IMU, "
+                    "persistent map, and movement history."
+                )
+            }
+        ]
+
+        # --------------------------------------------------
+        # LIDAR IMAGES
+        # --------------------------------------------------
+
+        view_labels = {
+
+            "navigation_xy":
+                (
+                    "NAVIGATION_XY - DIRECT TOP-DOWN "
+                    "LIDAR GEOMETRY"
+                ),
+
+            "polar_range":
+                (
+                    "POLAR_RANGE - DIRECT ANGLE / "
+                    "DISTANCE LIDAR VIEW"
+                ),
+
+            "left_corridor_xz":
+                (
+                    "LEFT_CORRIDOR_XZ - LEFT HALF OF "
+                    "THE ROVER TRAVEL CORRIDOR"
+                ),
+
+            "right_corridor_xz":
+                (
+                    "RIGHT_CORRIDOR_XZ - RIGHT HALF OF "
+                    "THE ROVER TRAVEL CORRIDOR"
+                )
+        }
+
+        view_order = [
+            "navigation_xy",
+            "polar_range",
+            "left_corridor_xz",
+            "right_corridor_xz"
+        ]
+
+        images_added = 0
+
+        for view_name in view_order:
+
+            filename = lidar_views.get(
+                view_name
+            )
+
+            if not filename:
+
+                print(
+                    "[AI] LiDAR view missing: "
+                    f"{view_name}"
+                )
+
+                continue
+
+            if not os.path.exists(
+                filename
+            ):
+
+                print(
+                    "[AI] LiDAR visualization "
+                    f"file not found: {filename}"
+                )
+
+                continue
+
+            image_base64 = self.encode_image(
+                filename
+            )
+
+            content.append({
+                "type": "text",
+                "text":
+                    view_labels[
+                        view_name
+                    ]
+            })
+
+            content.append({
+                "type": "image_url",
+
+                "image_url": {
+                    "url":
+                        "data:image/png;base64,"
+                        + image_base64,
+
+                    "detail":
+                        "high"
+                }
+            })
+
+            images_added += 1
+
+
+        # --------------------------------------------------
+        # DIRECT 10-DEGREE LIDAR MEASUREMENTS
+        # --------------------------------------------------
+
+        measurements_added = False
+
+        measurements_file = (
+            lidar_views.get(
+                "angular_measurements"
+            )
+        )
+
+        if (
+            measurements_file
+            and os.path.exists(
+                measurements_file
+            )
+        ):
+
+            try:
+
+                with open(
+                    measurements_file,
+                    "r"
+                ) as f:
+
+                    angular_measurements = (
+                        json.load(f)
+                    )
+
+                content.append({
+                    "type": "text",
+
+                    "text": (
+                        "DIRECT LIDAR 10-DEGREE "
+                        "MEASUREMENTS\n\n"
+
+                        "These contain direct measured "
+                        "point counts grouped by angle "
+                        "and distance.\n\n"
+
+                        "They are NOT blocked/clear "
+                        "classifications and do NOT "
+                        "contain a Python-selected best "
+                        "direction.\n\n"
+
+                        "Use neighboring angular regions "
+                        "together when evaluating a "
+                        "rover-sized travel path.\n\n"
+
+                        + json.dumps(
+                            angular_measurements,
+                            separators=(
+                                ",",
+                                ":"
+                            )
+                        )
+                    )
+                })
+
+                measurements_added = True
+
+                print(
+                    "[AI] Added direct 10-degree "
+                    "LiDAR measurements."
+                )
+
+            except Exception as e:
+
+                print(
+                    "[AI] Failed to load direct "
+                    "LiDAR measurements: "
+                    f"{e}"
+                )
+
+
+        # --------------------------------------------------
+        # SEND DIRECT LIDAR PACKAGE
+        # --------------------------------------------------
+
+        if (
+            images_added == 0
+            and not measurements_added
+        ):
+
+            print(
+                "[AI] No direct LiDAR geometry "
+                "inputs could be loaded."
             )
 
             return
@@ -1091,8 +1980,10 @@ class Autopilot:
         })
 
         print(
-            f"[AI] Sent {images_added} "
-            "LiDAR navigation images to Luna."
+            "[AI] Sent direct LiDAR package: "
+            f"{images_added} images, "
+            f"10-degree measurements="
+            f"{measurements_added}"
         )
 
     def add_camera_observation(
@@ -1176,9 +2067,6 @@ class Autopilot:
         if not isinstance(yaw, (int, float)):
             return
 
-        previous_yaw = self.navigation_state["current_yaw_deg"]
-
-        self.navigation_state["previous_yaw_deg"] = previous_yaw
         self.navigation_state["current_yaw_deg"] = yaw
 
         yaw_at_scan = self.navigation_state["yaw_at_last_lidar_deg"]
@@ -1225,14 +2113,42 @@ class Autopilot:
             "telemetry_valid": True
         }
     
-    def _handle_lidar_scan(
-        self,
-        call,
-        scanner,
-        ugv_cam,
-        dump_folder,
-        get_current_telemetry
-    ):
+    def _handle_lidar_scan(self, call, scanner, ugv_cam, dump_folder, get_current_telemetry):
+        
+
+        if self.navigation_state.get(
+            "defer_next_scan_after_turn",
+            False
+        ):
+            print(
+                "[AI] LiDAR scan deferred once after TURN. "
+                "Reuse existing geometry, camera, ultrasonics, "
+                "heading, and map first."
+            )
+
+            # Only defer ONE scan request.
+            self.navigation_state[
+                "defer_next_scan_after_turn"
+            ] = False
+
+            self.update_memory({
+                "role": "tool",
+                "tool_call_id": call.id,
+                "content": json.dumps({
+                    "status": "scan_deferred",
+                    "reason": (
+                        "One immediate post-turn LiDAR request was deferred. "
+                        "First reconsider the existing LiDAR geometry, "
+                        "fresh camera image, ultrasonics, heading, and map. "
+                        "If important geometric uncertainty still remains "
+                        "after reconsideration, a subsequent scan request "
+                        "is permitted."
+                    )
+                })
+            })
+
+            return
+    
         print("Starting LiDAR scan...")
 
         lidar_filename = scanner.scan(
@@ -1246,8 +2162,26 @@ class Autopilot:
 
         lidar_views = scanner.last_visualizations
 
+        # --------------------------------------------------
+        # DIRECT RAW LIDAR SAMPLE FOR LUNA
+        # --------------------------------------------------
+
+        raw_lidar_sample = (
+            self.create_raw_lidar_ai_sample(
+                lidar_filename,
+                stride=64
+            )
+        )
+
+        if raw_lidar_sample is not None:
+
+            lidar_views[
+                "raw_lidar_sample"
+            ] = raw_lidar_sample
+
+
         print(
-            "[AI] LiDAR visualization files:"
+            "[AI] LiDAR input files:"
         )
 
         for view_name, view_file in lidar_views.items():
@@ -1255,40 +2189,13 @@ class Autopilot:
                 f"    {view_name}: {view_file}"
             )
 
-        summary = self.summarize_scan_file(
-            lidar_filename
-        )
-
-        print(
-            "\n[LIDAR DEBUG] Environment summary:"
-        )
-
-        print(
-            json.dumps(
-                summary,
-                indent=2
-            )
-        )
+        summary = None
 
         print()
 
         self.navigation_state[
             "last_lidar_time"
         ] = time.time()
-
-        self.navigation_state[
-            "last_lidar"
-        ] = {
-            "zones":
-                summary.get(
-                    "zones",
-                    {}
-                )
-        }
-
-        self.navigation_state[
-            "movement_segments_since_lidar"
-        ] = 0
 
         self.navigation_state[
             "yaw_at_last_lidar_deg"
@@ -1324,8 +2231,16 @@ class Autopilot:
                 "file_path":
                     lidar_filename,
 
-                "summary":
-                    summary,
+                "lidar_geometry":
+                    (
+                        "The latest raw STL27L scan is represented "
+                        "directly through the LiDAR top-down point view, "
+                        "polar/range point view, and direct 10-degree "
+                        "angle/range point-count measurements. "
+                        "Python has not classified directions as blocked, "
+                        "clear, safe, unsafe, or preferable. "
+                        "Interpret the measured geometry yourself."
+                    ),
 
                 "navigation_map":
                     self.navigation_map.get_ai_context()
@@ -1335,6 +2250,20 @@ class Autopilot:
         self.add_lidar_visualizations(
             lidar_views
         )
+
+        # Send direct sampled raw STL27L measurements.
+        #
+        # This message is managed separately because only the
+        # newest ~16.8k-point raw sample should remain in memory.
+        self.add_raw_lidar_sample_to_memory(
+            raw_lidar_sample
+        )
+
+        if DEBUG_LIDAR_INTERPRETATION:
+
+            self.debug_lidar_interpretation(
+                lidar_views
+            )
 
         print(
             "[AI] GPT requested LiDAR scan. "
@@ -1633,6 +2562,7 @@ class Autopilot:
             reasoning_effort="none"
         )
 
+
     def decide_actions(self, telemetry, scanner, ugv_cam, dump_folder, get_current_telemetry):
 
         """
@@ -1676,7 +2606,7 @@ class Autopilot:
             if not message.tool_calls:
                 return []
 
-            for _ in range(MAX_TOOL_STEPS):
+            for call in message.tool_calls:
 
                 name = call.function.name
 
@@ -1992,7 +2922,7 @@ class Autopilot:
 
         if (
             isinstance(result, dict)
-            and result.get("status") == "completed"
+            and result.get("status") in ("completed", "partial")
             and isinstance(result.get("command"), dict)
         ):
             command = result["command"]
@@ -2001,7 +2931,8 @@ class Autopilot:
                 "op": command.get("op"),
                 "spd": command.get("spd"),
                 "turn_dir": command.get("turn_dir"),
-                "turn_degrees": command.get("turn_degrees"),
+                "requested_turn_degrees": command.get("turn_degrees"),
+                "actual_turn_degrees": result.get("actual_turn_degrees"),
                 "duration_s": result.get("movement_duration_s")
             }
 
@@ -2014,10 +2945,26 @@ class Autopilot:
                 )
 
             elif op == "TURN":
+                actual_turn_deg = result.get(
+                    "actual_turn_degrees"
+                )
+
+                # Normal IMU-controlled turns use the measured angle.
+                # The requested angle is used only if no measured angle
+                # exists, such as the old timed fallback mode.
+                if actual_turn_deg is None:
+                    actual_turn_deg = command.get(
+                        "turn_degrees"
+                    )
+
                 self.navigation_map.apply_turn(
                     turn_dir=command.get("turn_dir"),
-                    turn_degrees=command.get("turn_degrees")
+                    turn_degrees=actual_turn_deg
                 )
+
+                self.navigation_state[
+                    "defer_next_scan_after_turn"
+                ] = True
 
             if self.navigation_map_file:
 
@@ -2034,9 +2981,6 @@ class Autopilot:
                 self.navigation_state["recent_movements"][-20:]
             )
 
-            self.navigation_state[
-                "movement_segments_since_lidar"
-            ] += 1
 
         # ------------------------------------------
         # SEND TOOL RESULT TO GPT MEMORY

@@ -96,11 +96,11 @@ void sensors_setup()
   if (headlights_attached)
   {
     pinMode(hl_left_pin, OUTPUT);
-    digitalWrite(hl_left_pin, HIGH);
+    digitalWrite(hl_left_pin, LOW);
     pinMode(hl_right_pin, OUTPUT);
-    digitalWrite(hl_right_pin, HIGH);
+    digitalWrite(hl_right_pin, LOW);
     pinMode(hl_highbeam_pin, OUTPUT);
-    digitalWrite(hl_highbeam_pin, HIGH);
+    digitalWrite(hl_highbeam_pin, LOW);
   }
 
   pinMode(volt_batt, INPUT);
@@ -117,7 +117,7 @@ void control_headlights(uint16_t vis_lux)
 
   if (vis_lux < threshold_ambient_light)
   {
-    digitalWrite(hl_highbeam_pin, HIGH);
+    digitalWrite(hl_highbeam_pin, LOW);
   }
   else
   {
@@ -225,7 +225,7 @@ void sensors_ultrasonics_tick(uint32_t now_us)
     trig_high = false;
 
     // Capture current distances (with tearing protection) and accumulate
-    float snap[3];
+    float snap[num_ultrasonics];
     noInterrupts();
     for (int i = 0; i < num_ultrasonics; i++) snap[i] = ultrasonic_cm[i];
     interrupts();

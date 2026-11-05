@@ -19,10 +19,8 @@ from rover import camera            # ugv_cam
 from lidar import scan
 
 INPUT_BUFFER_SECONDS = 0.1
-STICK_MOVE_THRESHOLD = 0.05         # Fixes stick drift
 
 LLM_DRIVE_ENABLED = True     # If True, disables manual control for LLM autopilot
-HUMAN_APPROVAL = False #temporal for the rover to take aproval from user before executing any action
 
 LEFT_TURN_SPEED = 0.96
 RIGHT_TURN_SPEED = 0.90
@@ -85,30 +83,6 @@ def open_serial_connection() -> Serial:
     print(f"[INI] UART.py: UGV serial port opened at {s.name}.")
     return s
 
-def read_data(serial_conn : Serial) -> bytes | None:
-    """
-    Reads in as many bytes as are available from the Arduino via the serial
-    connection.
-
-    Args:
-        serial_conn (Serial): The serial connection between the Arduino and the
-            Raspberry Pi.
-    Returns:
-        data (bytes | None): Either the bytes waiting to be read from the buffer
-            or None if the buffer is empty.
-    Raises:
-        RuntimeError: If the read_data function was called on a closed serial 
-            port.
-    """
-
-    if serial_conn.is_open:
-        if bytes_waiting := serial_conn.in_waiting > 0:
-            data = serial_conn.read(bytes_waiting)
-        else:
-            data = None
-        return data
-    else:
-        raise RuntimeError("Attempted to read from closed serial port!")
     
 def listen_to_UGV(serial_conn: Serial, trip_json : str, dump_folder: str, controller_thread : Thread, ugv_cam) -> None:
     """
@@ -128,7 +102,7 @@ def listen_to_UGV(serial_conn: Serial, trip_json : str, dump_folder: str, contro
         set_pixel(ARD_ADDR, PX_WHITE) # MIGHT BE TOO QUICK TO OBSERVE
 
         ugv_data: bytes = serial_conn.read_until(expected=b'\n')
-
+            
         try:
             tel_dict = process_telemetry(ugv_data, ugv_cam)
 
@@ -236,7 +210,8 @@ def process_telemetry(data: bytes, ugv_cam=None) -> dict:
     batt_a = float(ard_vals[35].replace(val_prefixes[35], ''))
     batt_pct = float(ard_vals[36].replace(val_prefixes[36], ''))
 
-    # TEMP FAKE BATTERY VALUES FOR AUTOPILOT TESTING
+    # TODO: Remove test override once real battery telemetry is validated.
+    # Temporary fixed values used during autopilot development.
     batt_v = 16.2
     batt_a = 0.5
     batt_pct = 80.0
@@ -543,6 +518,343 @@ def generate_command(op : str, **kwargs) -> bytes | None:
 
 
 #this is for constant movement if it doesnt work remove it and change other stuff
+
+def _extract_yaw_deg(telemetry):
+    """Get BNO085 yaw from the latest telemetry dictionary."""
+    if not isinstance(telemetry, dict):
+        return None
+
+    imu = telemetry.get("imu", {})
+    yaw = imu.get("yaw_deg")
+
+    try:
+        return float(yaw)
+    except (TypeError, ValueError):
+        return None
+
+
+def _signed_angle_diff_deg(current_deg, start_deg):
+    """
+    Signed angular difference in range [-180, 180).
+
+    Positive = LEFT / counterclockwise
+    Negative = RIGHT / clockwise
+    """
+    return (
+        (current_deg - start_deg + 180.0) % 360.0
+    ) - 180.0
+
+
+def execute_imu_turn(
+    serial_conn,
+    command,
+    args,
+    get_current_telemetry,
+    fallback_duration_s
+):
+    """
+    Execute a TURN using BNO085 yaw feedback.
+
+    AEGIS convention confirmed by physical testing:
+
+        LEFT  = positive yaw change
+        RIGHT = negative yaw change
+
+    Old calibrated turn timing is retained only as a fallback
+    when a valid yaw is unavailable BEFORE the turn starts.
+
+    If IMU information disappears during a turn, the rover stops
+    instead of blindly continuing on timing.
+    """
+
+    global emergency_stop
+
+    turn_dir = str(
+        args.get("turn_dir", "LEFT")
+    ).upper()
+
+    target_deg = float(
+        args.get("turn_degrees", 15)
+    )
+
+    direction_sign = (
+        1.0 if turn_dir == "LEFT" else -1.0
+    )
+
+    # Stop slightly early because telemetry + motor stopping have latency.
+    # We will tune this after physical testing.
+    STOP_EARLY_DEG = 1.0
+
+    # There is intentionally NO movement-duration timeout here.
+    # Normal IMU-controlled turns continue until the requested
+    # measured yaw change is reached.
+
+    # This protects against the IMU itself disappearing, not
+    # against a slow turn.
+    YAW_LOSS_TIMEOUT_S = 2.0
+
+    # ----------------------------------------------------------
+    # GET START YAW
+    # ----------------------------------------------------------
+
+    start_yaw = None
+    start_wait_deadline = time.time() + 1.5
+
+    while time.time() < start_wait_deadline:
+
+        start_yaw = _extract_yaw_deg(
+            get_current_telemetry()
+        )
+
+        if start_yaw is not None:
+            break
+
+        time.sleep(0.05)
+
+    # ----------------------------------------------------------
+    # FALLBACK IF IMU IS NOT AVAILABLE BEFORE MOVEMENT
+    # ----------------------------------------------------------
+
+    if start_yaw is None:
+
+        print(
+            "[WARN] No valid BNO085 yaw before TURN. "
+            "Using timed fallback."
+        )
+
+        fallback_start = time.time()
+
+        execute_supervised_movement(
+            serial_conn=serial_conn,
+            command=command,
+            args=args,
+            get_current_telemetry=get_current_telemetry,
+            duration_s=fallback_duration_s
+        )
+
+        return {
+            "status": "completed",
+            "imu_controlled": False,
+            "fallback_used": True,
+            "movement_duration_s":
+                time.time() - fallback_start,
+            "requested_turn_degrees": target_deg
+        }
+
+    print(
+        f"[IMU TURN] START | "
+        f"direction={turn_dir} | "
+        f"target={target_deg:.1f} deg | "
+        f"start_yaw={start_yaw:.1f} deg"
+    )
+
+    # ----------------------------------------------------------
+    # CLOSED-LOOP TURN
+    # ----------------------------------------------------------
+
+    start_time = time.time()
+
+    last_valid_yaw_time = start_time
+    last_yaw = start_yaw
+
+    progress_deg = 0.0
+    reason = None
+    status = "failed"
+
+    stop_threshold = max(
+        0.0,
+        target_deg - STOP_EARLY_DEG
+    )
+
+    try:
+
+        while True:
+
+            now = time.time()
+            elapsed = now - start_time
+
+            # ------------------------------------------
+            # EMERGENCY STOP
+            # ------------------------------------------
+
+            if emergency_stop:
+
+                reason = "Emergency stop active"
+                print("[SAFE] Emergency stop during IMU turn.")
+                break
+
+            telemetry = get_current_telemetry()
+
+            yaw = _extract_yaw_deg(
+                telemetry
+            )
+
+            # ------------------------------------------
+            # VALID YAW
+            # ------------------------------------------
+
+            if yaw is not None:
+
+                last_valid_yaw_time = now
+
+                signed_delta = (
+                    _signed_angle_diff_deg(
+                        yaw,
+                        start_yaw
+                    )
+                )
+
+                progress_deg = (
+                    direction_sign
+                    * signed_delta
+                )
+
+                last_yaw = yaw
+
+                remaining = (
+                    target_deg
+                    - progress_deg
+                )
+
+                print(
+                    f"[IMU TURN] "
+                    f"yaw={yaw:7.1f} | "
+                    f"progress={progress_deg:6.1f}/{target_deg:.1f} deg | "
+                    f"remaining={remaining:6.1f}"
+                )
+
+                # --------------------------------------
+                # TARGET REACHED
+                # --------------------------------------
+
+                if progress_deg >= stop_threshold:
+
+                    status = "completed"
+                    reason = "IMU target reached"
+
+                    print(
+                        "[IMU TURN] Target reached. "
+                        "Stopping motors."
+                    )
+
+                    break
+
+                # --------------------------------------
+                # WRONG DIRECTION PROTECTION
+                # --------------------------------------
+
+                if progress_deg < -5.0:
+
+                    reason = (
+                        "Yaw changed opposite requested "
+                        "turn direction"
+                    )
+
+                    print(
+                        "[SAFE] IMU indicates rover is "
+                        "turning the wrong direction."
+                    )
+
+                    break
+
+            # ------------------------------------------
+            # IMU LOST
+            # ------------------------------------------
+
+            elif (
+                now - last_valid_yaw_time
+                > YAW_LOSS_TIMEOUT_S
+            ):
+
+                reason = "BNO085 yaw lost during turn"
+
+                print(
+                    "[SAFE] BNO085 yaw lost during turn."
+                )
+
+                break
+
+            # Keep commanding the turn.
+            serial_conn.write(command)
+
+            # 10 Hz command/control loop.
+            time.sleep(0.1)
+
+    finally:
+
+        # ALWAYS STOP MOTORS
+        stop_command = generate_command(
+            op="MOVE",
+            spd=0.0
+        )
+
+        if stop_command is not None:
+            serial_conn.write(stop_command)
+
+    # ----------------------------------------------------------
+    # MEASURE FINAL SETTLED YAW
+    # ----------------------------------------------------------
+
+    time.sleep(0.25)
+
+    end_yaw = _extract_yaw_deg(
+        get_current_telemetry()
+    )
+
+    # If the immediate settled reading was missed, use the
+    # most recent valid yaw that controlled the turn.
+    if end_yaw is None:
+        end_yaw = last_yaw
+
+    actual_turn_deg = None
+
+    if end_yaw is not None:
+
+        final_delta = _signed_angle_diff_deg(
+            end_yaw,
+            start_yaw
+        )
+
+        actual_turn_deg = (
+            direction_sign
+            * final_delta
+        )
+
+    elapsed = time.time() - start_time
+
+    # If movement occurred but the target was not completed,
+    # report it as a partial turn so the map can still record
+    # the real heading change.
+    if (
+        status != "completed"
+        and actual_turn_deg is not None
+        and actual_turn_deg > 0.5
+        and reason !=
+            "Yaw changed opposite requested turn direction"
+    ):
+        status = "partial"
+
+    print(
+        f"[IMU TURN] END | "
+        f"start={start_yaw:.1f} | "
+        f"end={end_yaw if end_yaw is not None else 'N/A'} | "
+        f"actual={actual_turn_deg if actual_turn_deg is not None else 'N/A'} | "
+        f"status={status}"
+    )
+
+    return {
+        "status": status,
+        "reason": reason,
+        "imu_controlled": True,
+        "fallback_used": False,
+        "requested_turn_degrees": target_deg,
+        "actual_turn_degrees": actual_turn_deg,
+        "start_yaw_deg": start_yaw,
+        "end_yaw_deg": end_yaw,
+        "movement_duration_s": elapsed
+    }
+
+
 def execute_supervised_movement(serial_conn, command, args, get_current_telemetry, duration_s=1.5 ):
     """
     Continuously resend an AI movement command for a short period
@@ -661,6 +973,21 @@ def give_controls_to_autopilot(serial_conn: Serial, trip_json: str, dump_folder:
             filepath=dump_folder,
             filename=trip_json
         )
+
+        if isinstance(telemetry, dict):
+            ultrasonics = telemetry.get(
+                "ultrasonics",
+                {}
+            )
+
+            print(
+                "[ULTRASONIC DEBUG] "
+                f"left={ultrasonics.get('left_cm')} | "
+                f"center={ultrasonics.get('center_cm')} | "
+                f"right={ultrasonics.get('right_cm')} | "
+                f"rear={ultrasonics.get('rear_cm')} | "
+                f"lidar={ultrasonics.get('lidar_cm')}"
+            )
 
         if telemetry is None:
             print("[ERR] UART.py: No telemetry available for autopilot.")
@@ -791,21 +1118,42 @@ def give_controls_to_autopilot(serial_conn: Serial, trip_json: str, dump_folder:
                             f"binary={int.from_bytes(command, 'big'):08b}"
                         )
 
-                        execute_supervised_movement(
-                            serial_conn=serial_conn,
-                            command=command,
-                            args=args,
-                            get_current_telemetry=get_current_telemetry,
-                            duration_s=duration_s
+                        if op == "TURN":
+
+                            movement_result = execute_imu_turn(
+                                serial_conn=serial_conn,
+                                command=command,
+                                args=args,
+                                get_current_telemetry=get_current_telemetry,
+                                fallback_duration_s=duration_s
+                            )
+
+                        else:
+
+                            execute_supervised_movement(
+                                serial_conn=serial_conn,
+                                command=command,
+                                args=args,
+                                get_current_telemetry=get_current_telemetry,
+                                duration_s=duration_s
+                            )
+
+                            movement_result = {
+                                "status": "completed",
+                                "movement_duration_s": duration_s
+                            }
+
+                        tool_result = {
+                            "command": args
+                        }
+
+                        tool_result.update(
+                            movement_result
                         )
 
                         spartan.add_tool_result(
                             action.id,
-                            {
-                                "status": "completed",
-                                "command": args,
-                                "movement_duration_s": duration_s
-                            }
+                            tool_result
                         )
 
                         # ------------------------------------------
@@ -916,8 +1264,6 @@ def run_comms() -> None:
     print(f"[INI] UART.py: Created trip telemetry JSON at {trip_json}.")
 
     serial_conn: Serial = open_serial_connection()
-
-    tripping = True
 
     controller_thread = Thread(target=control_UGV,
                                 args=[

@@ -45,12 +45,31 @@ def sph_to_cart(dist: float, l_a: float, m_a: float, i: float | None = None) -> 
     l_angle: float = np.deg2rad(l_a)				    # lidar angle phi in radians
     m_angle: float = np.deg2rad(m_a)				    # motor angle theta in radians
     
-    x: float = dist*np.cos(l_angle)*np.cos(m_angle)	    # x = r*sin(phi)*cos(theta)
-    y: float = dist*np.cos(l_angle)*np.sin(m_angle)	    # y = r*sin(phi)*sin(theta)
-    z: float = dist*np.sin(l_angle)					    # z = r*cos(phi)
+    #x: float = dist*np.cos(l_angle)*np.cos(m_angle)	    # x = r*sin(phi)*cos(theta)
+    #y: float = dist*np.cos(l_angle)*np.sin(m_angle)	    # y = r*sin(phi)*sin(theta)
+    #z: float = dist*np.sin(l_angle)					    # z = r*cos(phi)
     
-    x += SENSOR_OFFSET_MM*np.sin(m_angle)		# Correct for horizontal lidar offset
-    y += SENSOR_OFFSET_MM*np.cos(m_angle)		# Correct for horizontal lidar offset
+    #x += SENSOR_OFFSET_MM*np.sin(m_angle)		# Correct for horizontal lidar offset
+    #y += SENSOR_OFFSET_MM*np.cos(m_angle)		# Correct for horizontal lidar offset
+
+
+    x: float = ( dist * np.cos(l_angle) * np.sin(m_angle) )
+
+    y: float = ( -dist * np.cos(l_angle) * np.cos(m_angle) )
+
+    z: float = ( dist * np.sin(l_angle) )
+
+    # Correct for the LiDAR's horizontal offset
+    # from the stepper rotation axis.
+    #
+    # Motor orientation:
+    #   0 deg   = RIGHT
+    #   90 deg  = FRONT
+    #   180 deg = LEFT
+
+    x += ( SENSOR_OFFSET_MM * np.sin(m_angle) )
+
+    y -= ( SENSOR_OFFSET_MM * np.cos(m_angle) )
 
     point = [round(dim, 4) for dim in ([x, y, z, i] if i is not None else [x, y, z])]
 
@@ -101,13 +120,13 @@ def sph_to_cart_array(points: list[list[float]]) -> list[list[float]]:
     x = (
         dist
         * cos_lidar
-        * np.cos(motor_angle)
+        * np.sin(motor_angle)
     )
 
     y = (
-        dist
+        -dist
         * cos_lidar
-        * np.sin(motor_angle)
+        * np.cos(motor_angle)
     )
 
     z = (
@@ -121,7 +140,7 @@ def sph_to_cart_array(points: list[list[float]]) -> list[list[float]]:
         * np.sin(motor_angle)
     )
 
-    y += (
+    y -= (
         SENSOR_OFFSET_MM
         * np.cos(motor_angle)
     )

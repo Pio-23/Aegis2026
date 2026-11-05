@@ -27,7 +27,7 @@ constexpr uint32_t mega_baudrate = 460800;     // Baud of serial
 constexpr uint32_t ugv_baudrate  = 115200;     // Baud of serial1
 
 // Timing Parameters
-constexpr uint32_t telemetry_period_us         = 1000000;  //  1 Hz
+constexpr uint32_t telemetry_period_us         =  100000;  // 10 Hz
 constexpr uint32_t ultrasonic_sample_period_us =  100000;  // 10 Hz
 constexpr uint32_t sensor_sample_period_us     =  100000;  // 10 Hz
 constexpr uint32_t imu_sample_period_us        =  100000;  // 10 Hz
