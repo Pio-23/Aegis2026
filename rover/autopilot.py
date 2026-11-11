@@ -11,8 +11,16 @@ import openai
 
 from rover.navigation_map import NavigationMap
 
+from rover.aegis_corridor_geometry import query_forward_corridor
+
 DEBUG_LIDAR_INTERPRETATION = True
 
+# Select the new 3D LiDAR scene for Luna.
+# Disabled until offline payload testing passes.
+USE_3D_SCENE_FOR_LUNA = False
+
+ENABLE_LIDAR_QUERY_TOOL = False
+ENABLE_GEMMA_GEOMETRY_SHADOW = False
 
 class Autopilot:
 
@@ -1195,6 +1203,61 @@ class Autopilot:
                 }
             }
         },
+
+        {
+            "type": "function",
+            "function": {
+                "name": "query_lidar_geometry",
+                "description": (
+                    "Inspect actual measured 3D LiDAR points from the "
+                    "latest processed scan in a selected direction and "
+                    "height layer. Returns measured distances and XYZ "
+                    "evidence, not verified collision clearance. "
+                    "Angles are relative to the rover at SCAN TIME. "
+                    "This tool never moves the rover."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "angle_deg": {
+                            "type": "number",
+                            "minimum": -180,
+                            "maximum": 180,
+                            "description": (
+                                "0=front, +90=left, -90=right, "
+                                "180=back, relative to scan pose."
+                            )
+                        },
+                        "half_width_deg": {
+                            "type": "number",
+                            "exclusiveMinimum": 0,
+                            "maximum": 20,
+                            "description": (
+                                "Degrees to include on each side "
+                                "of the requested angle."
+                            )
+                        },
+                        "layer": {
+                            "type": "string",
+                            "enum": [
+                                "floor_candidate",
+                                "low",
+                                "mid",
+                                "high",
+                                "overhead"
+                            ]
+                        }
+                    },
+                    "required": [
+                        "angle_deg",
+                        "half_width_deg",
+                        "layer"
+                    ],
+                    "additionalProperties": False
+                }
+            }
+        },
+
         {
             "type": "function",
             "function": {
@@ -1222,6 +1285,25 @@ class Autopilot:
         }
     ]
 
+    aegis_tools.append({
+        "type": "function",
+        "function": {
+            "name": "query_forward_corridor",
+            "description": (
+                "Read measured low/mid-height XYZ returns in the experimental "
+                "forward 0.5-2m, left/center/right corridor, with a 10cm grid. "
+                "No-return cells are UNKNOWN, not traversable. "
+                "No motion permission."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "required": [],
+                "additionalProperties": False
+            }
+        }
+    })
+
     def __init__(self) -> None:
 
         self.memory_depth = 50  # Number of past interactions to remember
@@ -1244,7 +1326,7 @@ class Autopilot:
         }
 
         self.navigation_map = NavigationMap()
-        self.navigation_map_file = None
+        self.latest_lidar_geometry_file = None
 
         # Latest direct raw LiDAR sample sent to Luna.
         #
@@ -1794,6 +1876,19 @@ class Autopilot:
 
         view_labels = {
 
+
+            "scene_perception_png":
+                (
+                    "AEGIS 3D LIDAR PERCEPTION. "
+                    "Top-down measured geometry with height-aware "
+                    "obstacle information and a directional distance guide. "
+                    "Coordinate system: +X front, +Y left, +Z up. "
+                    "The floor height is estimated, not calibrated. "
+                    "Missing LiDAR returns mean UNKNOWN, not free space. "
+                    "Colors represent measured geometry, not verified "
+                    "safe travel corridors."
+                ),
+
             "navigation_xy":
                 (
                     "NAVIGATION_XY - DIRECT TOP-DOWN "
@@ -1817,6 +1912,7 @@ class Autopilot:
                     "RIGHT_CORRIDOR_XZ - RIGHT HALF OF "
                     "THE ROVER TRAVEL CORRIDOR"
                 )
+
         }
 
         view_order = [
@@ -1825,6 +1921,16 @@ class Autopilot:
             "left_corridor_xz",
             "right_corridor_xz"
         ]
+
+        # Prefer the new 3D scene when explicitly enabled.
+        # Otherwise retain the original LiDAR image inputs.
+        if (
+            USE_3D_SCENE_FOR_LUNA
+            and lidar_views.get("scene_perception_png")
+        ):
+            view_order = [
+                "scene_perception_png"
+            ]
 
         images_added = 0
 
@@ -2113,6 +2219,93 @@ class Autopilot:
             "telemetry_valid": True
         }
     
+
+    def _query_lidar_geometry(
+        self, angle_deg, half_width_deg=2.0, layer="mid"
+    ):
+        """Inspect measured XYZ points without controlling movement."""
+        import math
+        import numpy as np
+        from rover.aegis_lidar_scene import query_sector
+
+        allowed_layers = {
+            "floor_candidate", "low", "mid", "high", "overhead"
+        }
+
+        try:
+            angle = float(angle_deg)
+            half_width = float(half_width_deg)
+        except (TypeError, ValueError):
+            return {
+                "status": "invalid_query",
+                "reason": "Angle and width must be numbers"
+            }
+
+        if (
+            not math.isfinite(angle)
+            or not -180 <= angle <= 180
+            or not math.isfinite(half_width)
+            or not 0 < half_width <= 20
+            or layer not in allowed_layers
+        ):
+            return {
+                "status": "invalid_query",
+                "reason": "Invalid angle, half-width, or layer"
+            }
+
+        filename = getattr(
+            self, "latest_lidar_geometry_file", None
+        )
+
+        if not filename or not os.path.isfile(filename):
+            return {
+                "status": "no_geometry",
+                "reason": "No processed full scan available"
+            }
+
+        try:
+            with np.load(filename, allow_pickle=False) as npz:
+                points = npz["points_xyz_intensity"]
+                floor_z = float(npz["floor_z_sensor_frame"])
+
+            measurement = query_sector(
+                points, floor_z, angle, half_width, layer
+            )
+        except (OSError, ValueError, KeyError) as exc:
+            return {
+                "status": "query_error",
+                "reason": str(exc)
+            }
+
+        state = getattr(self, "navigation_state", {}) or {}
+        scan_time = state.get("last_lidar_time")
+
+        age = (
+            round(max(0.0, time.time() - scan_time), 1)
+            if isinstance(scan_time, (int, float))
+            else None
+        )
+
+        return {
+            "status": "ok",
+            "frame": "rover-local at scan time",
+            "scan_age_s": age,
+            "heading_change_since_scan_deg": state.get(
+                "heading_change_since_lidar_deg"
+            ),
+            "direction_deg": angle,
+            "half_width_deg": half_width,
+            "height_layer": layer,
+            "floor_z_estimated_m": floor_z,
+            "measurement": measurement,
+            "warning": (
+                "Measured returns only. Missing returns are "
+                "UNKNOWN, not clear. No movement authorization."
+            )
+        }
+
+
+
     def _handle_lidar_scan(self, call, scanner, ugv_cam, dump_folder, get_current_telemetry):
         
 
@@ -2161,6 +2354,19 @@ class Autopilot:
         )
 
         lidar_views = scanner.last_visualizations
+
+        self.latest_lidar_geometry_file = lidar_views.get(
+            "scene_full_geometry"
+        )
+        if ENABLE_GEMMA_GEOMETRY_SHADOW and self.latest_lidar_geometry_file:
+            from threading import Thread
+            from rover.aegis_gemma_geometry_shadow import run_shadow
+            Thread(
+                target=run_shadow,
+                args=(self.latest_lidar_geometry_file,),
+                daemon=True
+            ).start()
+
 
         # --------------------------------------------------
         # DIRECT RAW LIDAR SAMPLE FOR LUNA
@@ -2467,6 +2673,38 @@ class Autopilot:
         )
 
 
+    def _handle_lidar_geometry_query(self, call):
+        """Handle a read-only LiDAR measurement request."""
+
+        try:
+            args = json.loads(
+                call.function.arguments or "{}"
+            )
+
+            if not isinstance(args, dict):
+                raise ValueError("Expected a JSON object")
+
+            result = self._query_lidar_geometry(
+                angle_deg=args.get("angle_deg"),
+                half_width_deg=args.get(
+                    "half_width_deg", 2.0
+                ),
+                layer=args.get("layer", "mid")
+            )
+
+        except (ValueError, TypeError) as exc:
+            result = {
+                "status": "invalid_query",
+                "reason": str(exc)
+            }
+
+        self.update_memory({
+            "role": "tool",
+            "tool_call_id": call.id,
+            "content": json.dumps(result)
+        })
+
+
     def _handle_unknown_tool(
         self,
         call,
@@ -2545,23 +2783,99 @@ class Autopilot:
                 self.navigation_map.get_ai_context()
         }
 
-    def _request_model_action(self):
-        """
-        Ask the current navigation model for the next tool action.
+    def _query_forward_corridor(self):
+        """Read measurements from the most recent processed LiDAR scan."""
+        import os
+        import time
+        from rover.aegis_corridor_geometry import query_forward_corridor
 
-        Keeping the model request in one place will make it easier
-        to replace the cloud model with a local model later.
-        """
+        path = self.latest_lidar_geometry_file
+
+        if not path or not os.path.isfile(path):
+            return {
+                "status": "unavailable",
+                "reason": "No processed 3D scan yet"
+            }
+
+        last = self.navigation_state.get("last_lidar_time")
+        age = (
+            round(time.time() - last, 1)
+            if isinstance(last, (int, float))
+            else None
+        )
+
+        heading = self.navigation_state.get(
+            "heading_change_since_lidar_deg"
+        )
+
+        try:
+            result = query_forward_corridor(path)
+        except (OSError, ValueError, KeyError) as exc:
+            return {
+                "status": "error",
+                "reason": str(exc)
+            }
+
+        return {
+            "status": "ok",
+            "frame": "rover-local at scan time",
+            "scan_age_s": age,
+            "heading_change_since_scan_deg": heading,
+            "measurement": result,
+            "warning": (
+                "Historical scan frame, not clearance "
+                "or motion authorization."
+            )
+        }
+
+    def _handle_forward_corridor_query(self, call):
+        """Answer a geometry tool call without accessing rover motors."""
+        try:
+            arguments = json.loads(
+                call.function.arguments or "{}"
+            )
+
+            if arguments != {}:
+                raise ValueError(
+                    "query_forward_corridor takes no arguments"
+                )
+
+            result = self._query_forward_corridor()
+
+        except (ValueError, TypeError) as exc:
+            result = {
+                "status": "invalid_query",
+                "reason": str(exc)
+            }
+
+        self.update_memory({
+            "role": "tool",
+            "tool_call_id": call.id,
+            "content": json.dumps(result)
+        })
+
+    def _request_model_action(self):
+        """Request model action with optional read-only 3D tools."""
+
+        geometry_names = {
+            "query_lidar_geometry",
+            "query_forward_corridor"
+        }
+
+        tools = [
+            tool for tool in Autopilot.aegis_tools
+            if ENABLE_LIDAR_QUERY_TOOL
+            or tool["function"]["name"] not in geometry_names
+        ]
 
         return self.client.chat.completions.create(
             model=self.model_name,
             messages=self.memory,
-            tools=Autopilot.aegis_tools,
+            tools=tools,
             tool_choice="required",
             parallel_tool_calls=False,
             reasoning_effort="none"
         )
-
 
     def decide_actions(self, telemetry, scanner, ugv_cam, dump_folder, get_current_telemetry):
 
@@ -2630,6 +2944,19 @@ class Autopilot:
 
                     continue
 
+
+                    # ==========================================
+                    # LIDAR GEOMETRY QUERY
+                    # ==========================================
+
+                elif name == "query_lidar_geometry":
+
+                    self._handle_lidar_geometry_query(
+                        call
+                    )
+
+                    continue
+
                     # ==========================================
                     # CAMERA
                     # ==========================================
@@ -2647,6 +2974,10 @@ class Autopilot:
                     # ==========================================
                     # MOVE
                     # ==========================================
+                elif name == "query_forward_corridor":
+                    self._handle_forward_corridor_query(call)
+                    continue
+
                 elif name == "move_rover":
 
                     print(

@@ -19,6 +19,10 @@ import matplotlib.pyplot as plt
 # This limit applies ONLY to PNG rendering for Luna.
 MAX_VIS_POINTS = 300_000
 
+# Enable the new 3D geometric perception processor.
+# Keep disabled until integration testing is complete.
+ENABLE_3D_PERCEPTION = True
+
 # Navigation height range.
 MIN_NAV_Z = -0.27
 MAX_NAV_Z = 1.00
@@ -853,5 +857,33 @@ def create_lidar_visualizations(
         "[LIDAR VIS] Navigation visualizations "
         f"completed in {elapsed:.2f} seconds."
     )
+
+        # Optional 3D geometric perception
+    if ENABLE_3D_PERCEPTION:
+        if points.shape[1] < 4:
+            print("[LIDAR PERCEPTION] Missing XYZ/intensity data")
+        else:
+            try:
+                from rover.aegis_lidar_scene import create_perception_outputs
+
+                scene_dir = os.path.join(
+                    output_dir,
+                    f"perception_{timestamp}"
+                )
+
+                scene_files = create_perception_outputs(
+                    points[:, :4],
+                    scene_dir,
+                    source_name=f"AEGIS scan {timestamp}",
+                    map_radius_m=9.0,
+                    save_full_geometry=True
+                )
+
+                files["scene_perception_png"] = scene_files["perception_layers"]
+                files["scene_ranges_json"] = scene_files["angular_3d_ranges"]
+                files["scene_full_geometry"] = scene_files["full_point_geometry"]
+
+            except Exception as exc:
+                print(f"[LIDAR PERCEPTION] Failed: {exc}")
 
     return files
