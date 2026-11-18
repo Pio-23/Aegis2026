@@ -16,7 +16,7 @@ from rover.navigation_map import NavigationMap
 # Disabled until offline payload testing passes.
 ENABLE_LIDAR_QUERY_TOOL = False
 ENABLE_AUTONOMOUS_MOVEMENT = True
-ENABLE_LIDAR_MAP_INGEST = True
+ENABLE_LIDAR_MAP_INGEST = False
 
 class Autopilot:
 
