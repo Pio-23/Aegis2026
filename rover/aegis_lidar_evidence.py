@@ -44,50 +44,9 @@ DIRECTIONS = (
 
 
 def get_renderer():
-    """Load the existing tested 3D LiDAR renderer."""
-
-    import sys
-    import importlib.util
-    from pathlib import Path
-
-    root = Path(__file__).resolve().parents[1]
-
-    tests_dir = root / "tests"
-
-    path = tests_dir / "aegis_lidar_front_3d.py"
-
-    if not path.is_file():
-        raise FileNotFoundError(
-            f"Missing existing renderer: {path}"
-        )
-
-    # The renderer imports helper functions from
-    # other files inside the tests directory.
-    #
-    # Make those existing helpers importable.
-    tests_path = str(tests_dir)
-
-    if tests_path not in sys.path:
-        sys.path.insert(0, tests_path)
-
-    spec = importlib.util.spec_from_file_location(
-        "aegis_render_latest_scan",
-        path
-    )
-
-    if spec is None or spec.loader is None:
-        raise RuntimeError(
-            "Could not load 3D renderer"
-        )
-
-    viewer = importlib.util.module_from_spec(
-        spec
-    )
-
-    spec.loader.exec_module(viewer)
-
-    return viewer
-
+    """Load the production 3D LiDAR renderer."""
+    from rover import aegis_lidar_front_3d
+    return aegis_lidar_front_3d
 
 
 def direction_from_xy(x, y):
