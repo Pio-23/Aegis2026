@@ -270,39 +270,53 @@ class Scanner():
         if convert:
             cloud = self.convert_cloud(cloud)
             set_pixel(LQ2_ADDR, PX_GREEN)
-            if visualize:
-                print(
-                    "[RUN] scan.py: Generating LiDAR visualizations..."
-                )
 
-                self.last_visualizations = create_lidar_visualizations(
+        # Save original measurements before rendering.
+        filename = None
+
+        if save:
+            filename = self.save_cloud(
+                cloud=cloud,
+                filepath=filepath
+            )
+
+            set_pixel(LQ3_ADDR, PX_GREEN)
+
+        # Prevent reuse of previous scan paths.
+        self.last_visualizations = {}
+
+        if convert and visualize:
+            print(
+                "[RUN] scan.py: Generating 3D "
+                "perception outputs..."
+            )
+
+            self.last_visualizations = (
+                create_lidar_visualizations(
                     points=cloud,
                     output_dir=filepath,
                     debug_3d=debug_3d
                 )
+            )
 
+            for name, path in (
+                self.last_visualizations.items()
+            ):
                 print(
-                    "[RUN] scan.py: LiDAR visualizations completed."
+                    f"[RUN] scan.py: {name}: {path}"
                 )
 
-                for view_name, view_file in self.last_visualizations.items():
-                    print(
-                        f"[RUN] scan.py: {view_name}: {view_file}"
-                    )
-        if save:
-            filename: str = self.save_cloud(cloud=cloud, filepath=filepath)
-            set_pixel(LQ3_ADDR, PX_GREEN)
-            duration_s: float = time.time() - start_time_s
-            duration_s = round(duration_s, 2)
+        duration_s = round(
+            time.time() - start_time_s,
+            2
+        )
 
-            print(f"[RUN] scan.py: Scan completed in {duration_s} seconds.")
-            return filename
-        
-        duration_s: float = time.time() - start_time_s
-        duration_s = round(duration_s, 2)
+        print(
+            "[RUN] scan.py: Scan completed in "
+            f"{duration_s} seconds."
+        )
 
-        print(f"[RUN] scan.py: Scan completed in {duration_s} seconds.")
-        return None
+        return filename
 
 
 def test_scan() -> None:

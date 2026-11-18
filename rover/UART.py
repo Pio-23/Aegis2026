@@ -8,6 +8,7 @@ from threading import Thread
 import os
 import time
 import json
+import math
 
 
 from utils import serial_utils      # UGV_BAUDRATE
@@ -29,6 +30,7 @@ LEFT_SECONDS_PER_15_DEG = 0.50
 RIGHT_SECONDS_PER_15_DEG = 3.5 / 6.0   # ~= 0.5833
 
 emergency_stop = False
+autopilot_shutdown = False
 
 tripping: bool = False
 scanner = scan.Scanner()
@@ -341,12 +343,13 @@ def control_UGV(serial_conn : Serial, dump_folder: str, tripping: bool) -> None:
     while tripping:
 
         current_time: float = time.time()
-        global emergency_stop
+        global emergency_stop, autopilot_shutdown
 
         if LLM_DRIVE_ENABLED:
             if controller.input_states['BTN_START'] and controller.input_states['BTN_SELECT']:
                 print("[SAFE] Emergency stop triggered from controller.")
                 emergency_stop = True
+                autopilot_shutdown = True
                 serial_conn.write(generate_command(op="MOVE", spd=0.0))
                 tripping = False
                 break
@@ -446,7 +449,28 @@ def control_UGV(serial_conn : Serial, dump_folder: str, tripping: bool) -> None:
             # START + Y: take LiDAR scan
             if (controller.input_states['BTN_START']
             and controller.input_states['BTN_Y']):
-                scanner.scan(filepath=dump_folder)
+                _aegis_scan_file = scanner.scan(filepath=dump_folder)
+
+                if _aegis_scan_file:
+                    try:
+                        from rover.aegis_scan_package import (
+                            build_scan_package
+                        )
+
+                        _aegis_package = build_scan_package(
+                            _aegis_scan_file
+                        )
+
+                        print(
+                            "[LIDAR PACKAGE] Completed:",
+                            _aegis_package["output_dir"]
+                        )
+
+                    except Exception as exc:
+                        print(
+                            "[LIDAR PACKAGE] Error:",
+                            repr(exc)
+                        )
 
             # START + RIGHT BUMPER: increase scan resolution
             if (controller.input_states['BTN_START'] 
@@ -673,6 +697,11 @@ def execute_imu_turn(
             now = time.time()
             elapsed = now - start_time
 
+            if elapsed > max(8.0, fallback_duration_s * 3.0 + 2.0):
+                reason = "Turn watchdog timeout"
+                print("[SAFE] Turn watchdog timeout; STOP.")
+                break
+
             # ------------------------------------------
             # EMERGENCY STOP
             # ------------------------------------------
@@ -870,6 +899,13 @@ def execute_supervised_movement(serial_conn, command, args, get_current_telemetr
     FRONT_STOP_CM = 35.0
     REAR_STOP_CM = 35.0
 
+    def valid_cm(value):
+        try:
+            d = float(value)
+            return math.isfinite(d) and d > 0
+        except (TypeError, ValueError, OverflowError):
+            return False
+
     # Get movement information once
     op = args.get("op")
     spd = args.get("spd", 0.0)
@@ -878,6 +914,7 @@ def execute_supervised_movement(serial_conn, command, args, get_current_telemetr
     print(f"[AI] Movement duration: {duration_s:.3f}s")
 
     start_time = time.time()
+    issued_movement = False
 
     while (time.time() - start_time) < duration_s:
 
@@ -905,15 +942,12 @@ def execute_supervised_movement(serial_conn, command, args, get_current_telemetr
 
         if op == "MOVE" and spd > 0:
 
-            front_readings = [
-                value for value in [left, center, right]
-                if value is not None and value > 0
-            ]
+            front_readings = [left, center, right]
+            if not all(valid_cm(v) for v in front_readings):
+                print("[SAFE] Invalid front ultrasonic data; STOP.")
+                break
 
-            if (
-                front_readings
-                and min(front_readings) < FRONT_STOP_CM
-            ):
+            if min(front_readings) < FRONT_STOP_CM:
                 print(
                     "[SAFE] Front ultrasonic obstacle detected. "
                     "Stopping movement."
@@ -926,11 +960,11 @@ def execute_supervised_movement(serial_conn, command, args, get_current_telemetr
 
         if op == "MOVE" and spd < 0:
 
-            if (
-                rear is not None
-                and rear > 0
-                and rear < REAR_STOP_CM
-            ):
+            if not valid_cm(rear):
+                print("[SAFE] Invalid rear ultrasonic data; STOP.")
+                break
+
+            if rear < REAR_STOP_CM:
                 print(
                     "[SAFE] Rear ultrasonic obstacle detected. "
                     "Stopping movement."
@@ -939,6 +973,7 @@ def execute_supervised_movement(serial_conn, command, args, get_current_telemetr
 
         # Keep sending the same movement command
         serial_conn.write(command)
+        issued_movement = True
 
         # Roughly 10 Hz, similar to manual control behavior
         time.sleep(0.1)
@@ -951,7 +986,23 @@ def execute_supervised_movement(serial_conn, command, args, get_current_telemetr
         )
     )
 
-    print("[AI] Supervised movement segment completed.")
+    actual_s = round(
+        min(max(time.time() - start_time, 0.0), duration_s), 3
+    )
+    if not issued_movement:
+        status = "blocked"
+        actual_s = 0.0
+    elif actual_s >= duration_s - 0.12:
+        status = "completed"
+    else:
+        status = "partial"
+
+    print(f"[AI] Movement result: {status}, {actual_s:.2f}s")
+    return {
+        "status": status,
+        "movement_duration_s": actual_s,
+        "requested_duration_s": duration_s
+    }
 
 
 def give_controls_to_autopilot(serial_conn: Serial, trip_json: str, dump_folder: str, tripping: bool, ugv_cam ) -> None:
@@ -967,7 +1018,7 @@ def give_controls_to_autopilot(serial_conn: Serial, trip_json: str, dump_folder:
             filename=trip_json
         )
 
-    while tripping:
+    while tripping and not autopilot_shutdown:
 
         telemetry = file_utils.get_latest_telemetry(
             filepath=dump_folder,
@@ -1009,6 +1060,10 @@ def give_controls_to_autopilot(serial_conn: Serial, trip_json: str, dump_folder:
             get_current_telemetry
         )
 
+        if autopilot_shutdown:
+            serial_conn.write(generate_command(op="MOVE", spd=0.0))
+            break
+
         for action in actions:
 
             name = action.function.name
@@ -1049,7 +1104,7 @@ def give_controls_to_autopilot(serial_conn: Serial, trip_json: str, dump_folder:
 
                     if op == "MOVE":
                         
-                        duration_s = float(args.get("move_duration_s", 1.5))
+                        duration_s = max(0.2, min(8.0, float(args.get("move_duration_s", 1.5))))
 
                         args["move_duration_s"] = duration_s
 
@@ -1130,7 +1185,7 @@ def give_controls_to_autopilot(serial_conn: Serial, trip_json: str, dump_folder:
 
                         else:
 
-                            execute_supervised_movement(
+                            movement_result = execute_supervised_movement(
                                 serial_conn=serial_conn,
                                 command=command,
                                 args=args,
@@ -1138,10 +1193,6 @@ def give_controls_to_autopilot(serial_conn: Serial, trip_json: str, dump_folder:
                                 duration_s=duration_s
                             )
 
-                            movement_result = {
-                                "status": "completed",
-                                "movement_duration_s": duration_s
-                            }
 
                         tool_result = {
                             "command": args

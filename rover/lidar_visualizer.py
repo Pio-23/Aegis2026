@@ -292,40 +292,18 @@ def _create_angular_measurements(
     return output_file
 
 
+
 def create_lidar_visualizations(
     points,
     output_dir,
     debug_3d=False
 ):
-    """
-    Create navigation-focused LiDAR visualizations.
+    """Generate only retained 3D perception outputs.
 
-    Full LiDAR data is preserved for:
-        - persistent map
-        - distance summary
-        - saved cloud
+    Legacy XY, XZ, polar and 10-degree outputs
+    are no longer generated.
 
-    PNG rendering uses a smaller subset for speed.
-
-    Normal Luna views:
-
-        1. navigation_xy
-           Top-down navigation geometry.
-
-        2. corridor_xz
-           Vertical slice through the rover's actual
-           center travel corridor.
-
-    Optional:
-
-        3. xyz_3d
-           Full 3D debug view for human inspection.
-
-    Coordinate convention:
-
-        +X = FRONT
-        +Y = LEFT
-        +Z = UP
+    Preserve the original return keys for callers.
     """
 
     start_time = time.time()
@@ -335,555 +313,73 @@ def create_lidar_visualizations(
         exist_ok=True
     )
 
+    if not ENABLE_3D_PERCEPTION:
+        print(
+            "[LIDAR PERCEPTION] Disabled."
+        )
+        return {}
+
     points = np.asarray(
         points,
-        dtype=float
+        dtype=np.float32
     )
 
     if (
         points.ndim != 2
-        or points.shape[1] < 3
+        or points.shape[1] < 4
     ):
         raise ValueError(
-            f"Expected LiDAR points shaped "
-            f"(N, 3+) but got {points.shape}"
+            "Perception requires Nx4 XYZ/intensity points"
         )
 
-    # ------------------------------------------------------
-    # EXTRACT XYZ
-    # ------------------------------------------------------
-
-    x = points[:, 0]
-    y = points[:, 1]
-    z = points[:, 2]
-
-    valid = (
-        np.isfinite(x)
-        & np.isfinite(y)
-        & np.isfinite(z)
-    )
-
-    # Remove invalid zero returns.
-    nonzero = (
-        np.sqrt(
-            x**2 +
-            y**2 +
-            z**2
-        )
-        > 0.001
-    )
-
-    valid &= nonzero
-
-    x = x[valid]
-    y = y[valid]
-    z = z[valid]
-
-    full_point_count = len(x)
-
-    print(
-        f"[LIDAR VIS] Full valid cloud: "
-        f"{full_point_count:,} points"
+    from rover.aegis_lidar_scene import (
+        create_perception_outputs
     )
 
     timestamp = time.strftime(
         "%Y%m%d_%H%M%S"
     )
 
-    files = {}
-
-
-    # ======================================================
-    # 1. NAVIGATION XY TOP-DOWN
-    # ======================================================
-
-    # Only retain heights relevant to rover navigation.
-    nav_mask = (
-        (z > MIN_NAV_Z)
-        & (z < MAX_NAV_Z)
-    )
-
-    nav_x = x[nav_mask]
-    nav_y = y[nav_mask]
-    nav_z = z[nav_mask]
-
-    nav_full_count = len(
-        nav_x
-    )
-
-    (
-        vis_x,
-        vis_y,
-        vis_z
-    ) = _downsample_xyz(
-        nav_x,
-        nav_y,
-        nav_z
-    )
-
-    xy_file = os.path.join(
+    scene_dir = os.path.join(
         output_dir,
-        f"lidar_navigation_xy_{timestamp}.png"
+        f"perception_{timestamp}"
     )
 
-    fig, ax = plt.subplots(
-        figsize=(9, 9)
+    scene_files = create_perception_outputs(
+        points[:, :4],
+        scene_dir,
+        source_name=f"AEGIS scan {timestamp}",
+        map_radius_m=9.0,
+        save_full_geometry=True
     )
 
-    ax.scatter(
-        vis_y,
-        vis_x,
-        s=0.22,
-        alpha=0.70
-    )
+    expected = {
+        "scene_perception_png": "perception_layers",
+        "scene_ranges_json": "angular_3d_ranges",
+        "scene_full_geometry": "full_point_geometry"
+    }
 
-    ax.scatter(
-        [0],
-        [0],
-        s=100,
-        marker="^",
-        label="AEGIS Rover"
-    )
+    result = {}
 
-    ax.set_xlabel(
-        "Y (m)   +Y = LEFT"
-    )
+    for output_key, source_key in expected.items():
+        filename = scene_files.get(source_key)
 
-    ax.set_ylabel(
-        "X (m)   +X = FRONT"
-    )
+        if (
+            not filename
+            or not os.path.isfile(filename)
+        ):
+            raise RuntimeError(
+                f"Perception output missing: {source_key}"
+            )
 
-    ax.set_title(
-        "AEGIS LiDAR - Navigation Top-Down\n"
-        f"{nav_full_count:,} navigation points | "
-        f"{len(vis_x):,} rendered"
-    )
+        result[output_key] = filename
 
-    ax.set_aspect(
-        "equal",
-        adjustable="box"
-    )
-
-    # +Y = LEFT, so positive Y belongs visually
-    # on the left side of the image.
-    ax.invert_xaxis()
-
-    ax.grid(True)
-
-    ax.legend(
-        loc="upper right"
-    )
-
-    fig.savefig(
-        xy_file,
-        dpi=IMAGE_DPI
-    )
-
-    plt.close(fig)
-
-    files[
-        "navigation_xy"
-    ] = xy_file
+    elapsed = time.time() - start_time
 
     print(
-        "[LIDAR VIS] Navigation XY saved: "
-        f"{xy_file}"
+        "[LIDAR PERCEPTION] "
+        "Perception layers and full geometry saved. "
+        f"Time: {elapsed:.2f}s"
     )
 
-
-        # ======================================================
-    # 2. DIRECT POLAR / RANGE VIEW
-    # ======================================================
-
-    (
-        polar_x,
-        polar_y,
-        polar_z
-    ) = _downsample_xyz(
-        nav_x,
-        nav_y,
-        nav_z
-    )
-
-    polar_angles = np.arctan2(
-        polar_y,
-        polar_x
-    )
-
-    polar_ranges = np.hypot(
-        polar_x,
-        polar_y
-    )
-
-    polar_file = os.path.join(
-        output_dir,
-        f"lidar_polar_range_{timestamp}.png"
-    )
-
-    fig = plt.figure(
-        figsize=(9, 9)
-    )
-
-    ax = fig.add_subplot(
-        111,
-        projection="polar"
-    )
-
-    # FRONT is visually at the top.
-    ax.set_theta_zero_location(
-        "N"
-    )
-
-    # Positive angle = LEFT.
-    ax.set_theta_direction(
-        1
-    )
-
-    ax.scatter(
-        polar_angles,
-        polar_ranges,
-        s=0.25,
-        alpha=0.70
-    )
-
-    ax.set_title(
-        "AEGIS LiDAR - Direct Polar Range View\n"
-        "0° = FRONT | +90° = LEFT | "
-        "-90° = RIGHT | 180° = BACK"
-    )
-
-    ax.grid(True)
-
-    fig.savefig(
-        polar_file,
-        dpi=IMAGE_DPI
-    )
-
-    plt.close(fig)
-
-    files[
-        "polar_range"
-    ] = polar_file
-
-    print(
-        "[LIDAR VIS] Polar range saved: "
-        f"{polar_file}"
-    )
-
-
-    # ======================================================
-    # 3. DIRECT 10-DEGREE RANGE MEASUREMENTS
-    # ======================================================
-
-    angular_file = os.path.join(
-        output_dir,
-        f"lidar_angular_10deg_{timestamp}.json"
-    )
-
-    _create_angular_measurements(
-        x=nav_x,
-        y=nav_y,
-        output_file=angular_file
-    )
-
-    files[
-        "angular_measurements"
-    ] = angular_file
-
-    # ======================================================
-    # LEFT SIDE
-    # ======================================================
-
-    # Do NOT collapse the entire room into X/Z.
-    #
-    # Only show geometry physically near the
-    # rover's center travel corridor.
-    
-    left_corridor_mask = (
-        (y >= 0.0)
-        & (y <= CORRIDOR_HALF_WIDTH_M)
-    )
-
-    left_x = x[left_corridor_mask]
-    left_y = y[left_corridor_mask]
-    left_z = z[left_corridor_mask]
-
-    left_full_count = len(left_x)
-
-    ( left_vis_x, left_vis_y, left_vis_z) = _downsample_xyz( left_x, left_y, left_z)
-
-    left_file = os.path.join(
-        output_dir,
-        f"lidar_left_corridor_xz_{timestamp}.png"
-    )
-
-    fig, ax = plt.subplots(
-        figsize=(11, 7)
-    )
-
-    ax.scatter(
-        left_vis_x,
-        left_vis_z,
-        s=0.35,
-        alpha=0.65
-    )
-
-    ax.scatter(
-        [0],
-        [0],
-        s=100,
-        marker="^",
-        label="AEGIS Rover"
-    )
-
-    ax.set_xlabel(
-        "X (m)   +X = FRONT"
-    )
-
-    ax.set_ylabel(
-        "Z (m)   +Z = UP"
-    )
-
-    ax.set_title(
-        "AEGIS LiDAR - LEFT Travel Corridor\n"
-        f"0 <= Y <= {CORRIDOR_HALF_WIDTH_M:.2f} m | "
-        f"{left_full_count:,} points | "
-        f"{len(left_vis_x):,} rendered"
-    )
-
-    ax.grid(True)
-
-    ax.legend(
-        loc="upper right"
-    )
-
-    fig.savefig(
-        left_file,
-        dpi=IMAGE_DPI
-    )
-
-    plt.close(fig)
-
-    files[
-        "left_corridor_xz"
-    ] = left_file
-
-
-    
-    # ======================================================
-    # RIGHT SIDE
-    # ======================================================
-
-    right_corridor_mask = (
-        (y <= 0.0)
-        & (y >= -CORRIDOR_HALF_WIDTH_M)
-    )
-
-    right_x = x[right_corridor_mask]
-    right_y = y[right_corridor_mask]
-    right_z = z[right_corridor_mask]
-
-    right_full_count = len(right_x)
-
-    (
-        right_vis_x,
-        right_vis_y,
-        right_vis_z
-    ) = _downsample_xyz(
-        right_x,
-        right_y,
-        right_z
-    )
-
-    right_file = os.path.join(
-        output_dir,
-        f"lidar_right_corridor_xz_{timestamp}.png"
-    )
-
-    fig, ax = plt.subplots(
-        figsize=(11, 7)
-    )
-
-    ax.scatter(
-        right_vis_x,
-        right_vis_z,
-        s=0.35,
-        alpha=0.65
-    )
-
-    ax.scatter(
-        [0],
-        [0],
-        s=100,
-        marker="^",
-        label="AEGIS Rover"
-    )
-
-    ax.set_xlabel(
-        "X (m)   +X = FRONT"
-    )
-
-    ax.set_ylabel(
-        "Z (m)   +Z = UP"
-    )
-
-    ax.set_title(
-        "AEGIS LiDAR - RIGHT Travel Corridor\n"
-        f"-{CORRIDOR_HALF_WIDTH_M:.2f} <= Y <= 0 m | "
-        f"{right_full_count:,} points | "
-        f"{len(right_vis_x):,} rendered"
-    )
-
-    ax.grid(True)
-
-    ax.legend(
-        loc="upper right"
-    )
-
-    fig.savefig(
-        right_file,
-        dpi=IMAGE_DPI
-    )
-
-    plt.close(fig)
-
-    files[
-        "right_corridor_xz"
-    ] = right_file
-
-
-    # ======================================================
-    # 3. OPTIONAL FULL 3D DEBUG VIEW
-    # ======================================================
-
-    if debug_3d:
-
-        (
-            debug_x,
-            debug_y,
-            debug_z
-        ) = _downsample_xyz(
-            x,
-            y,
-            z
-        )
-
-        debug_file = os.path.join(
-            output_dir,
-            f"lidar_xyz_debug_{timestamp}.png"
-        )
-
-        fig = plt.figure(
-            figsize=(10, 8)
-        )
-
-        ax = fig.add_subplot(
-            111,
-            projection="3d"
-        )
-
-        ax.scatter(
-            debug_x,
-            debug_y,
-            debug_z,
-            s=0.25,
-            alpha=0.45
-        )
-
-        ax.scatter(
-            [0],
-            [0],
-            [0],
-            s=100,
-            marker="^",
-            label="AEGIS Rover"
-        )
-
-        ax.set_xlabel(
-            "X - Front"
-        )
-
-        ax.set_ylabel(
-            "Y - Left"
-        )
-
-        ax.set_zlabel(
-            "Z - Up"
-        )
-
-        ax.set_title(
-            "AEGIS LiDAR - 3D DEBUG VIEW\n"
-            f"{len(debug_x):,} rendered points"
-        )
-
-        ax.view_init(
-            elev=25,
-            azim=-60
-        )
-
-        ax.legend(
-            loc="upper right"
-        )
-
-        fig.savefig(
-            debug_file,
-            dpi=IMAGE_DPI
-        )
-
-        plt.close(fig)
-
-        files[
-            "xyz_debug"
-        ] = debug_file
-
-        print(
-            "[LIDAR VIS] 3D debug saved: "
-            f"{debug_file}"
-        )
-
-
-
-
-    # ======================================================
-    # FINISHED
-    # ======================================================
-
-    elapsed = (
-        time.time()
-        - start_time
-    )
-
-    print(
-        "[LIDAR VIS] Navigation visualizations "
-        f"completed in {elapsed:.2f} seconds."
-    )
-
-        # Optional 3D geometric perception
-    if ENABLE_3D_PERCEPTION:
-        if points.shape[1] < 4:
-            print("[LIDAR PERCEPTION] Missing XYZ/intensity data")
-        else:
-            try:
-                from rover.aegis_lidar_scene import create_perception_outputs
-
-                scene_dir = os.path.join(
-                    output_dir,
-                    f"perception_{timestamp}"
-                )
-
-                scene_files = create_perception_outputs(
-                    points[:, :4],
-                    scene_dir,
-                    source_name=f"AEGIS scan {timestamp}",
-                    map_radius_m=9.0,
-                    save_full_geometry=True
-                )
-
-                files["scene_perception_png"] = scene_files["perception_layers"]
-                files["scene_ranges_json"] = scene_files["angular_3d_ranges"]
-                files["scene_full_geometry"] = scene_files["full_point_geometry"]
-
-            except Exception as exc:
-                print(f"[LIDAR PERCEPTION] Failed: {exc}")
-
-    return files
+    return result

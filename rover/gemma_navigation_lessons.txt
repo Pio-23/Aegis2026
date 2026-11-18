@@ -1,0 +1,44 @@
+AEGIS EXPLORATION LESSONS
+
+1. EXPLORE WITH PURPOSE.
+Maintain a route objective. In a sufficiently clear hallway,
+prefer continued forward progress over frequent direction changes.
+
+2. USE LONGER FORWARD SEGMENTS WHEN VERIFIED SAFE.
+A useful target is 6-8 seconds at moderate speed in open corridors.
+This is not a minimum. Shorten or stop when clearance is uncertain.
+Each segment still requires independent obstacle supervision.
+
+3. DO NOT OSCILLATE.
+Avoid turning LEFT then RIGHT repeatedly without new evidence or
+meaningful progress. Consider a supported alternative route.
+
+4. REUSE 360-DEGREE LIDAR.
+A turn in place does not erase the previous scan's geometry.
+Account for estimated heading changes, but remember IMU yaw can
+be inaccurate. Rescan when fresh information is genuinely useful,
+not automatically after every turn.
+
+5. UNDERSTAND SIDE OPENINGS.
+Front-left and front-right ultrasonic sensors are front-facing.
+They do not prove whether the left or right SIDE is clear.
+Use full 360-degree LiDAR geometry and rover footprint checks.
+
+6. TRACK ACTUAL PROGRESS CAREFULLY.
+Commanded movement duration is not measured travel distance.
+Interrupted movements and inaccurate heading can cause map drift.
+
+7. RECOGNIZE UNCERTAINTY.
+Do not assume missing LiDAR returns indicate open space.
+Do not recommend turning unless the rover's swept footprint
+has enough clearance. Explain what information is missing.
+
+8. AVOID UNNECESSARY INACTION.
+If the front is blocked but a measured, sufficiently wide side
+passage exists, consider turning toward it instead of endlessly
+requesting scans or NO_OP.
+
+9. LEARN FROM REVIEWED EXAMPLES.
+A human-reviewed success or failure is useful evidence.
+Do not treat every Luna decision or every Gemma prediction as
+automatically correct.

@@ -20,3 +20,25 @@ planning.txt
 # Ignore Python cache
 __pycache__/
 *.pyc
+
+# AEGIS local files and backups
+/stream/static/trips/
+venv/
+.venv/
+aegis-local-ai/
+node_modules/
+__pycache__/
+*.pyc
+*.before_*
+*.backup_*
+*.bad_paste
+.env
+.env.*
+*.pem
+*.key
+
+# Old AEGIS experimental outputs
+/stream/static/ros_slam_tests/
+
+# Temporary pre-IMU backups
+*.pre_imu_turn

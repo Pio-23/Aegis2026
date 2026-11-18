@@ -298,7 +298,8 @@ class NavigationMap:
         self,
         filename,
         summary=None,
-        visualization_files=None
+        visualization_files=None,
+        scan_frame="legacy_rover"
     ):
         """
         Add a Cartesian LiDAR scan to the persistent world map.
@@ -311,6 +312,13 @@ class NavigationMap:
         Instead of storing ~1 million raw points forever, the map
         stores occupied 10 cm grid cells.
         """
+
+        if scan_frame not in (
+            "legacy_rover", "lidar_provisional"
+        ):
+            raise ValueError(
+                f"Unsupported scan frame: {scan_frame}"
+            )
 
         if not filename:
             return
@@ -384,6 +392,15 @@ class NavigationMap:
                     and math.isfinite(local_z)
                 ):
                     continue
+
+                # Explicit optional sensor-frame
+                # to rover-frame conversion.
+                # LiDAR: +Y front, +X right.
+                # Map:   +X front, +Y left.
+                if scan_frame == "lidar_provisional":
+                    local_x, local_y = (
+                        local_y, -local_x
+                    )
 
                 # ----------------------------------------------
                 # Remove rover body
